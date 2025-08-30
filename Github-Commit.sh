@@ -53,13 +53,25 @@ if [ ! -d "$PROJECT_ROOT/.git" ]; then
     exit 1
 fi
 
-# Check if remote is configured
+# Check if remote is configured and correct
 cd "$PROJECT_ROOT"
+EXPECTED_REMOTE="https://github.com/arw052/STRES-Extension-Alpha.git"
+
 if ! git remote get-url origin >/dev/null 2>&1; then
     print_warning "No git remote 'origin' configured."
     print_status "Setting up remote for STRES-Extension-Alpha repository..."
-    git remote add origin https://github.com/arw052/STRES-Extension-Alpha.git
+    git remote add origin "$EXPECTED_REMOTE"
     print_status "Remote added successfully."
+else
+    CURRENT_REMOTE=$(git remote get-url origin)
+    if [ "$CURRENT_REMOTE" != "$EXPECTED_REMOTE" ]; then
+        print_warning "Git remote 'origin' points to wrong repository:"
+        print_warning "  Current: $CURRENT_REMOTE"
+        print_warning "  Expected: $EXPECTED_REMOTE"
+        print_status "Updating remote URL..."
+        git remote set-url origin "$EXPECTED_REMOTE"
+        print_status "Remote updated successfully."
+    fi
 fi
 
 # Go to extension directory and add changes
@@ -89,15 +101,21 @@ fi
 
 # Push to GitHub
 print_status "Pushing to GitHub (main branch)..."
-if git push origin main; then
+if git push origin main 2>/dev/null; then
+    print_status "Successfully pushed to GitHub!"
+    print_status "Repository: https://github.com/arw052/STRES-Extension-Alpha"
+elif git push origin main --force-with-lease 2>/dev/null; then
+    print_warning "Used force push due to conflicts. Make sure this is intentional."
     print_status "Successfully pushed to GitHub!"
     print_status "Repository: https://github.com/arw052/STRES-Extension-Alpha"
 else
     print_error "Failed to push to GitHub."
-    print_status "You may need to:"
-    print_status "  1. Set up authentication (git config --global credential.helper store)"
-    print_status "  2. Or use SSH instead of HTTPS"
-    print_status "  3. Or push manually: git push origin main"
+    print_status "This might be due to:"
+    print_status "  1. Authentication issues - set up credentials:"
+    print_status "     git config --global credential.helper store"
+    print_status "  2. Use SSH instead of HTTPS"
+    print_status "  3. Manual push: git push origin main"
+    print_status "  4. Pull first if there are conflicts: git pull origin main"
     exit 1
 fi
 
