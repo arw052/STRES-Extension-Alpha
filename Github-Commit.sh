@@ -120,3 +120,4 @@ else
 fi
 
 print_status "Extension update complete!"
+print_status "Repository: https://github.com/arw052/STRES-Extension-Alpha"
