@@ -2,9 +2,9 @@
 Object.defineProperty(exports, "__esModule", { value: true });
 exports.dsamService = exports.DSAMService = void 0;
 const BaseService_1 = require("../../services/BaseService");
-const tokenCounter_1 = require("../../../shared/utils/tokenCounter");
-const compressionUtils_1 = require("../../../shared/utils/compressionUtils");
-const relevanceScorer_1 = require("../../../shared/utils/relevanceScorer");
+const tokenCounter_1 = require("../../shared/utils/tokenCounter");
+const compressionUtils_1 = require("../../shared/utils/compressionUtils");
+const relevanceScorer_1 = require("../../shared/utils/relevanceScorer");
 const DEFAULT_DSAM_CONFIG = {
     enabled: true,
     compressionLevel: 5,

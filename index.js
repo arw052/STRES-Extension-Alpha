@@ -13,35 +13,37 @@
   root.style.position = 'relative';
   doc.body.appendChild(root);
 
-  // Styles
+  // Styles - using proper extension paths
+  const extensionPath = '/scripts/extensions/third-party/STRES-Extension-Alpha';
+  
   const link = doc.createElement('link');
   link.rel = 'stylesheet';
-  link.href = 'styles/base.css';
+  link.href = `${extensionPath}/styles/base.css`;
   doc.head.appendChild(link);
   const linkSettings = doc.createElement('link');
   linkSettings.rel = 'stylesheet';
-  linkSettings.href = 'styles/settings.css';
+  linkSettings.href = `${extensionPath}/styles/settings.css`;
   doc.head.appendChild(linkSettings);
   const linkQuick = doc.createElement('link');
   linkQuick.rel = 'stylesheet';
-  linkQuick.href = 'styles/quickbar.css';
+  linkQuick.href = `${extensionPath}/styles/quickbar.css`;
   doc.head.appendChild(linkQuick);
   const linkInventory = doc.createElement('link');
   linkInventory.rel = 'stylesheet';
-  linkInventory.href = 'styles/inventory.css';
+  linkInventory.href = `${extensionPath}/styles/inventory.css`;
   doc.head.appendChild(linkInventory);
   // Import UI removed - using folder-based system instead
 
   // Load runtime (precompiled) UI logic if available
   const runtimeScript = doc.createElement('script');
-  runtimeScript.src = 'ui/runtime.js';
+  runtimeScript.src = `${extensionPath}/ui/runtime.js`;
   runtimeScript.defer = true;
   doc.head.appendChild(runtimeScript);
   
   // Load inventory system
   const inventoryScript = doc.createElement('script');
   inventoryScript.type = 'module';
-  inventoryScript.src = 'ui/inventory/integration/SillyTavernHooks.js';
+  inventoryScript.src = `${extensionPath}/ui/inventory/integration/SillyTavernHooks.js`;
   inventoryScript.defer = true;
   doc.head.appendChild(inventoryScript);
 

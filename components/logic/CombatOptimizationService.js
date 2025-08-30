@@ -2,8 +2,8 @@
 Object.defineProperty(exports, "__esModule", { value: true });
 exports.combatOptimizationService = exports.CombatOptimizationService = void 0;
 const BaseService_1 = require("../../services/BaseService");
-const tokenCounter_1 = require("../../../shared/utils/tokenCounter");
-const compressionUtils_1 = require("../../../shared/utils/compressionUtils");
+const tokenCounter_1 = require("../../shared/utils/tokenCounter");
+const compressionUtils_1 = require("../../shared/utils/compressionUtils");
 const DEFAULT_COMBAT_CONFIG = {
     enabled: true,
     tokenBudget: 800,
