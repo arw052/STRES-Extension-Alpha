@@ -1,0 +1,442 @@
+/* STRES Inventory System Styles */
+
+/* Quickbar Widget Styles */
+.stres-inventory-widget {
+  background: var(--SmartThemeBlurTintColor, rgba(0, 0, 0, 0.9));
+  border: 1px solid var(--SmartThemeBorderColor, #444);
+  border-radius: 8px;
+  padding: 8px;
+  backdrop-filter: blur(10px);
+  user-select: none;
+  transition: all 0.3s ease;
+}
+
+.stres-inventory-widget.updated {
+  animation: pulse 0.3s ease;
+}
+
+@keyframes pulse {
+  0%, 100% { transform: scale(1); }
+  50% { transform: scale(1.02); }
+}
+
+/* Compact Widget */
+.inventory-widget-compact {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  min-width: 80px;
+}
+
+.inventory-widget-compact .inventory-icon {
+  font-size: 18px;
+}
+
+.inventory-widget-compact .item-count {
+  font-size: 14px;
+  color: var(--SmartThemeBodyColor, #fff);
+  min-width: 20px;
+  text-align: center;
+}
+
+.inventory-widget-compact .weight-indicator {
+  font-size: 12px;
+  transition: color 0.3s ease;
+}
+
+/* Full Widget */
+.inventory-widget-full {
+  min-width: 200px;
+  max-width: 250px;
+}
+
+.widget-header {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  margin-bottom: 8px;
+  padding-bottom: 6px;
+  border-bottom: 1px solid var(--SmartThemeBorderColor, #444);
+}
+
+.inventory-icon {
+  font-size: 18px;
+}
+
+.inventory-label {
+  font-size: 14px;
+  font-weight: 500;
+  color: var(--SmartThemeBodyColor, #fff);
+}
+
+.widget-stats {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  font-size: 12px;
+  color: var(--SmartThemeQuoteColor, #aaa);
+  margin-bottom: 8px;
+}
+
+.weight-display {
+  flex: 1;
+}
+
+.carry-weight {
+  display: block;
+  margin-bottom: 4px;
+}
+
+.weight-bar {
+  width: 100%;
+  height: 4px;
+  background: var(--black30a, rgba(0, 0, 0, 0.3));
+  border-radius: 2px;
+  overflow: hidden;
+}
+
+.weight-fill {
+  height: 100%;
+  transition: width 0.3s ease, background-color 0.3s ease;
+}
+
+/* Weight Classes */
+.weight-ok { 
+  color: #4ade80;
+  background-color: #4ade80;
+}
+
+.weight-warning { 
+  color: #facc15;
+  background-color: #facc15;
+}
+
+.weight-critical { 
+  color: #ef4444;
+  background-color: #ef4444;
+  animation: blink 1s infinite;
+}
+
+@keyframes blink {
+  0%, 100% { opacity: 1; }
+  50% { opacity: 0.6; }
+}
+
+/* Equipped Gear */
+.equipped-gear {
+  display: flex;
+  gap: 6px;
+  margin-bottom: 8px;
+  justify-content: center;
+}
+
+.gear-slot {
+  width: 32px;
+  height: 32px;
+  border: 1px solid var(--SmartThemeBorderColor, #444);
+  border-radius: 4px;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  font-size: 14px;
+  background: var(--black30a, rgba(0, 0, 0, 0.3));
+  transition: all 0.2s ease;
+  cursor: pointer;
+}
+
+.gear-slot:hover {
+  transform: scale(1.1);
+  border-color: var(--SmartThemeQuoteColor, #666);
+}
+
+.gear-slot.equipped {
+  border-color: var(--SmartThemeCheckboxBorderColor, #007acc);
+  background: var(--SmartThemeCheckboxBorderColor, #007acc);
+  box-shadow: 0 0 8px rgba(0, 122, 204, 0.5);
+}
+
+/* Widget Actions */
+.widget-actions {
+  display: flex;
+  gap: 6px;
+  justify-content: center;
+}
+
+.btn-icon {
+  background: transparent;
+  border: 1px solid var(--SmartThemeBorderColor, #444);
+  border-radius: 4px;
+  width: 32px;
+  height: 28px;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  cursor: pointer;
+  font-size: 14px;
+  transition: all 0.2s ease;
+  color: var(--SmartThemeBodyColor, #fff);
+}
+
+.btn-icon:hover {
+  background: var(--SmartThemeCheckboxBorderColor, #007acc);
+  border-color: var(--SmartThemeCheckboxBorderColor, #007acc);
+  transform: scale(1.05);
+}
+
+/* Chat Message Styles */
+.stres-inventory-message {
+  margin: 8px 0;
+  animation: slideIn 0.3s ease;
+}
+
+@keyframes slideIn {
+  from {
+    opacity: 0;
+    transform: translateY(-10px);
+  }
+  to {
+    opacity: 1;
+    transform: translateY(0);
+  }
+}
+
+.stres-message-content {
+  padding: 8px;
+  background: var(--SmartThemeBlurTintColor, rgba(0, 0, 0, 0.8));
+  border-radius: 6px;
+  color: var(--SmartThemeBodyColor, #fff);
+}
+
+.stres-message-content pre {
+  background: var(--black30a, rgba(0, 0, 0, 0.3));
+  padding: 8px;
+  border-radius: 4px;
+  overflow-x: auto;
+  font-family: monospace;
+  font-size: 12px;
+}
+
+.stres-message-content code {
+  background: var(--black30a, rgba(0, 0, 0, 0.3));
+  padding: 2px 4px;
+  border-radius: 2px;
+  font-family: monospace;
+  font-size: 0.9em;
+}
+
+.stres-message-content strong {
+  color: var(--SmartThemeCheckboxBorderColor, #007acc);
+}
+
+/* Effect Notifications */
+.stres-effect-notification {
+  animation: slideInRight 0.3s ease;
+}
+
+@keyframes slideInRight {
+  from {
+    opacity: 0;
+    transform: translateX(20px);
+  }
+  to {
+    opacity: 1;
+    transform: translateX(0);
+  }
+}
+
+@keyframes slideOut {
+  from {
+    opacity: 1;
+    transform: translateX(0);
+  }
+  to {
+    opacity: 0;
+    transform: translateX(20px);
+  }
+}
+
+/* Settings Panel Styles */
+.inventory-settings {
+  padding: 16px;
+  background: var(--SmartThemeBlurTintColor, rgba(0, 0, 0, 0.9));
+  border-radius: 8px;
+  margin: 8px 0;
+}
+
+.inventory-settings h3 {
+  color: var(--SmartThemeBodyColor, #fff);
+  margin-bottom: 16px;
+  font-size: 18px;
+  border-bottom: 1px solid var(--SmartThemeBorderColor, #444);
+  padding-bottom: 8px;
+}
+
+.setting-group {
+  margin-bottom: 20px;
+  padding: 12px;
+  background: var(--black30a, rgba(0, 0, 0, 0.3));
+  border-radius: 6px;
+}
+
+.setting-group label {
+  display: flex;
+  align-items: center;
+  color: var(--SmartThemeBodyColor, #fff);
+  font-size: 14px;
+  margin-bottom: 8px;
+  cursor: pointer;
+}
+
+.setting-group label.checkbox {
+  gap: 8px;
+}
+
+.setting-group input[type="checkbox"] {
+  width: 16px;
+  height: 16px;
+  cursor: pointer;
+}
+
+.setting-group select,
+.setting-group input[type="number"] {
+  background: var(--SmartThemeBlurTintColor, rgba(0, 0, 0, 0.6));
+  border: 1px solid var(--SmartThemeBorderColor, #444);
+  color: var(--SmartThemeBodyColor, #fff);
+  padding: 4px 8px;
+  border-radius: 4px;
+  font-size: 13px;
+  margin-left: 8px;
+}
+
+.sub-settings {
+  margin-left: 24px;
+  margin-top: 8px;
+  padding-left: 12px;
+  border-left: 2px solid var(--SmartThemeBorderColor, #444);
+}
+
+.sub-settings label {
+  font-size: 13px;
+  color: var(--SmartThemeQuoteColor, #aaa);
+}
+
+/* Mobile Responsive */
+@media (max-width: 768px) {
+  .stres-inventory-widget {
+    padding: 6px;
+  }
+  
+  .inventory-widget-full {
+    min-width: 150px;
+    max-width: 180px;
+  }
+  
+  .widget-stats {
+    flex-direction: column;
+    gap: 4px;
+    align-items: flex-start;
+  }
+  
+  .equipped-gear {
+    gap: 4px;
+  }
+  
+  .gear-slot {
+    width: 28px;
+    height: 28px;
+    font-size: 12px;
+  }
+  
+  .btn-icon {
+    width: 28px;
+    height: 24px;
+    font-size: 12px;
+  }
+  
+  .inventory-settings {
+    padding: 12px;
+  }
+  
+  .setting-group {
+    padding: 8px;
+  }
+  
+  .sub-settings {
+    margin-left: 16px;
+    padding-left: 8px;
+  }
+}
+
+/* Dark Theme Override */
+@media (prefers-color-scheme: dark) {
+  .stres-inventory-widget {
+    background: rgba(20, 20, 30, 0.95);
+    border-color: #333;
+  }
+  
+  .weight-bar {
+    background: rgba(255, 255, 255, 0.1);
+  }
+  
+  .gear-slot {
+    background: rgba(255, 255, 255, 0.05);
+    border-color: #333;
+  }
+  
+  .btn-icon {
+    border-color: #333;
+  }
+  
+  .btn-icon:hover {
+    background: #0066aa;
+    border-color: #0066aa;
+  }
+}
+
+/* Light Theme Override */
+@media (prefers-color-scheme: light) {
+  .stres-inventory-widget {
+    background: rgba(255, 255, 255, 0.95);
+    border-color: #ddd;
+    color: #333;
+  }
+  
+  .inventory-label,
+  .item-count {
+    color: #333;
+  }
+  
+  .widget-stats {
+    color: #666;
+  }
+  
+  .weight-bar {
+    background: rgba(0, 0, 0, 0.1);
+  }
+  
+  .gear-slot {
+    background: rgba(0, 0, 0, 0.05);
+    border-color: #ddd;
+  }
+  
+  .btn-icon {
+    border-color: #ddd;
+    color: #333;
+  }
+  
+  .btn-icon:hover {
+    background: #0088cc;
+    border-color: #0088cc;
+    color: #fff;
+  }
+  
+  .stres-message-content {
+    background: rgba(255, 255, 255, 0.95);
+    color: #333;
+  }
+  
+  .stres-message-content pre,
+  .stres-message-content code {
+    background: rgba(0, 0, 0, 0.05);
+  }
+}

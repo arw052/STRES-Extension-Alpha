@@ -1,0 +1,7 @@
+{
+  "name": "STRES Extension Experimental",
+  "version": "0.1.0",
+  "entry": "index.js",
+  "description": "STRES UI, quickbar, inventory hooks, and SillyTavern integration.",
+  "author": "STRES Team"
+}

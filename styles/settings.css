@@ -1,0 +1,36 @@
+.stres-settings-panel {
+  position: fixed;
+  right: 1rem; bottom: 1rem;
+  width: min(92vw, 480px);
+  max-height: min(86vh, 720px);
+  background: var(--stres-surface);
+  color: var(--stres-text);
+  border: 1px solid var(--stres-border);
+  border-radius: var(--stres-radius);
+  box-shadow: 0 10px 30px rgba(0,0,0,0.35);
+  display: grid; grid-template-rows: auto 1fr auto;
+  overflow: hidden;
+  z-index: 60;
+}
+.stres-settings-panel[aria-hidden="true"] { display: none; }
+
+.stres-settings__header { display: flex; align-items: center; justify-content: space-between; padding: 0.75rem 1rem; border-bottom: 1px solid var(--stres-border); }
+.stres-settings__content { padding: 0.75rem 1rem; overflow: auto; }
+.stres-settings__footer { display: flex; gap: 0.5rem; justify-content: flex-end; padding: 0.75rem 1rem; border-top: 1px solid var(--stres-border); }
+
+.stres-settings__section { margin: 0.5rem 0 1rem; }
+.stres-settings__section h3 { margin: 0.25rem 0 0.5rem; font-size: 0.95rem; color: var(--stres-muted); }
+
+.stres-notice {
+  display: none;
+  background: rgba(100, 180, 120, 0.15);
+  color: var(--stres-text);
+  padding: 0.5rem 1rem;
+  border-top: 1px solid var(--stres-border);
+  border-bottom: 1px solid var(--stres-border);
+}
+.stres-notice[data-visible="true"] { display: block; }
+
+@media (min-width: 768px) {
+  .stres-settings-panel { width: 560px; }
+}

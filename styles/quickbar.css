@@ -1,0 +1,18 @@
+.stres-quickbar {
+  position: sticky;
+  bottom: 0;
+  left: 0; right: 0;
+  display: flex; align-items: center; justify-content: space-between;
+  gap: 0.5rem; padding: 0.5rem 0.75rem;
+  background: var(--stres-surface);
+  color: var(--stres-text);
+  border-top: 1px solid var(--stres-border);
+  z-index: 50;
+}
+.stres-quickbar__left, .stres-quickbar__right { display: inline-flex; gap: 0.5rem; align-items: center; }
+.stres-quickbar__widget { font-variant-numeric: tabular-nums; color: var(--stres-muted); }
+
+@media (min-width: 768px) {
+  .stres-quickbar { padding: 0.6rem 1rem; }
+}
+

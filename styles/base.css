@@ -1,0 +1,50 @@
+/* STRES Base Styles – matches SillyTavern feel while staying unobtrusive */
+:root {
+  --stres-bg: var(--bg-primary, #141414);
+  --stres-surface: var(--bg-secondary, #1e1e1e);
+  --stres-text: var(--text-primary, #e6e6e6);
+  --stres-muted: var(--text-secondary, #a0a0a0);
+  --stres-accent: var(--accent, #6aa9ff);
+  --stres-danger: #e5484d;
+  --stres-border: rgba(255, 255, 255, 0.08);
+  --stres-radius: 10px;
+  --stres-radius-sm: 8px;
+}
+
+[data-theme="light"] {
+  --stres-bg: #fafafa;
+  --stres-surface: #ffffff;
+  --stres-text: #1a1a1a;
+  --stres-muted: #5c5c5c;
+  --stres-border: rgba(0, 0, 0, 0.08);
+}
+
+.stres-btn {
+  appearance: none;
+  background: var(--stres-accent);
+  color: #fff;
+  border: none;
+  padding: 0.5rem 0.75rem;
+  border-radius: var(--stres-radius-sm);
+  cursor: pointer;
+  transition: transform 120ms ease, opacity 120ms ease;
+}
+.stres-btn:hover { opacity: 0.92; }
+.stres-btn:active { transform: translateY(1px); }
+.stres-btn--ghost {
+  background: transparent;
+  color: var(--stres-text);
+  border: 1px solid var(--stres-border);
+}
+.stres-btn--danger { background: var(--stres-danger); }
+.stres-btn--icon { background: transparent; border: none; color: var(--stres-text); font-size: 1rem; }
+
+.stres-field { display: grid; gap: 0.25rem; margin: 0.5rem 0; }
+.stres-field--row { display: inline-flex; align-items: center; gap: 0.5rem; }
+
+/* Accessibility utilities */
+.sr-only {
+  position: absolute; width: 1px; height: 1px; padding: 0; margin: -1px;
+  overflow: hidden; clip: rect(0, 0, 0, 0); white-space: nowrap; border: 0;
+}
+

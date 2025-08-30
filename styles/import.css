@@ -1,0 +1,28 @@
+.stres-import[aria-hidden="true"] { display: none; }
+.stres-import {
+  position: fixed; inset: 0; z-index: 70; display: grid; place-items: center;
+}
+.stres-import__overlay {
+  position: absolute; inset: 0; background: rgba(0,0,0,0.5);
+}
+.stres-import__sheet {
+  position: relative; background: var(--stres-surface); color: var(--stres-text);
+  width: min(92vw, 720px); max-height: 86vh; border: 1px solid var(--stres-border);
+  border-radius: var(--stres-radius); box-shadow: 0 10px 30px rgba(0,0,0,0.35);
+  display: grid; grid-template-rows: auto 1fr auto; overflow: hidden; z-index: 71;
+}
+.stres-import__header { display: flex; align-items: center; justify-content: space-between; padding: 0.75rem 1rem; border-bottom: 1px solid var(--stres-border); }
+.stres-import__body { padding: 1rem; overflow: auto; display: grid; gap: 0.75rem; }
+.stres-import__actions { display: flex; justify-content: flex-end; gap: 0.5rem; padding: 0.75rem 1rem; border-top: 1px solid var(--stres-border); }
+.stres-import__help { color: var(--stres-muted); margin: 0; }
+.stres-dropzone {
+  border: 2px dashed var(--stres-border); border-radius: var(--stres-radius-sm);
+  padding: 1.25rem; text-align: center; color: var(--stres-muted); cursor: pointer;
+}
+.stres-dropzone[data-hover="true"] { border-color: var(--stres-accent); color: var(--stres-text); }
+.stres-import__preview { background: rgba(255,255,255,0.03); border: 1px solid var(--stres-border); border-radius: var(--stres-radius-sm); padding: 0.75rem; }
+
+@media (min-width: 768px) {
+  .stres-import__body { grid-template-columns: 1fr; }
+}
+
