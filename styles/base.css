@@ -178,4 +178,5 @@
 .stres-combat-log-entry.error {
   color: var(--stres-danger);
 }
-
+@import url('settings.css');
+@import url('import.css');

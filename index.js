@@ -133,6 +133,40 @@ const STRESChat = {
           try { window.STRES?.toggleSettings?.(); } catch {}
           this.sendToChat('⚙️ Opened STRES settings panel');
           return '';
+        case 'setapi': {
+          const url = (parts[2] || '').trim();
+          if (!url) {
+            this.sendToChat('Usage: /stres setapi http://host:port');
+            return '';
+          }
+          const s = window.extension_settings || (window.SillyTavern?.getContext?.().extensionSettings);
+          s[extensionName] = s[extensionName] || {};
+          s[extensionName].serverUrl = url.replace(/\/$/, '');
+          try { if (stresClient) stresClient.baseUrl = s[extensionName].serverUrl; } catch {}
+          try { const ctx = window.SillyTavern?.getContext?.(); (ctx?.saveSettingsDebounced || window.saveSettingsDebounced)?.(); } catch {}
+          try { window.STRES?.refreshSettingsUI?.(); } catch {}
+          this.sendToChat(`✅ API URL set to ${s[extensionName].serverUrl}`);
+          return '';
+        }
+        case 'set': {
+          const key = (parts[2] || '').toLowerCase();
+          const value = (parts.slice(3).join(' ') || '').trim();
+          const s = window.extension_settings || (window.SillyTavern?.getContext?.().extensionSettings);
+          s[extensionName] = s[extensionName] || {};
+          if (key === 'campaign') {
+            s[extensionName].campaignId = value || null;
+            this.sendToChat(`✅ Campaign ID set to ${s[extensionName].campaignId || 'None'}`);
+          } else if (key === 'char' || key === 'character') {
+            s[extensionName].characterId = value || null;
+            this.sendToChat(`✅ Character ID set to ${s[extensionName].characterId || 'None'}`);
+          } else {
+            this.sendToChat('Usage: /stres set campaign <id> | /stres set character <id>');
+            return '';
+          }
+          try { const ctx = window.SillyTavern?.getContext?.(); (ctx?.saveSettingsDebounced || window.saveSettingsDebounced)?.(); } catch {}
+          try { window.STRES?.refreshSettingsUI?.(); } catch {}
+          return '';
+        }
         case 'reset':
           this.resetSettings();
           return '';
@@ -251,6 +285,9 @@ const STRESChat = {
 • /stres join - Reconnect WebSocket
 • /stres campaign - Show campaign info
 • /stres settings - Toggle settings panel
+• /stres setapi <url> - Set API base URL
+• /stres set campaign <id> - Set campaign ID
+• /stres set character <id> - Set character ID
 • /stres reset - Reset settings to defaults
 • /stres debug - Show debug information
 • /stres fixport - Fix API port configuration
@@ -631,6 +668,33 @@ function initializeUI() {
       inpCamp.value = cur.campaignId || '';
       inpChar.value = cur.characterId || '';
     };
+    // Initialize fields from persisted settings
+    try { window.STRES.refreshSettingsUI(); } catch {}
+  })();
+
+  // Small floating toggle button (in case user can’t find the panel)
+  (function addSettingsToggleButton(){
+    try {
+      const btnId = 'stres-settings-toggle';
+      if (doc.getElementById(btnId)) return;
+      const btn = doc.createElement('button');
+      btn.id = btnId;
+      btn.className = 'stres-btn stres-btn--icon';
+      btn.title = 'STRES Settings';
+      btn.textContent = '⚙';
+      btn.style.position = 'fixed';
+      btn.style.right = '1rem';
+      btn.style.bottom = '1rem';
+      btn.style.zIndex = '61';
+      btn.style.background = 'var(--stres-surface)';
+      btn.style.border = '1px solid var(--stres-border)';
+      btn.style.borderRadius = '999px';
+      btn.style.width = '36px';
+      btn.style.height = '36px';
+      btn.style.lineHeight = '34px';
+      btn.addEventListener('click', () => window.STRES?.toggleSettings?.());
+      root.appendChild(btn);
+    } catch {}
   })();
 
   console.log("[STRES] UI components initialized");
@@ -661,10 +725,116 @@ if (document.readyState === 'loading') {
   document.addEventListener('DOMContentLoaded', () => {
     initializeExtension().then(() => {
       setTimeout(hookChatInput, 1000); // Delay to ensure SillyTavern is fully loaded
+      try { integrateWithExtensionsManager(); } catch {}
     });
   });
 } else {
   initializeExtension().then(() => {
     setTimeout(hookChatInput, 1000);
+    try { integrateWithExtensionsManager(); } catch {}
   });
+}
+
+// Register settings panel in SillyTavern's Extensions manager
+function integrateWithExtensionsManager() {
+  const doc = document;
+  const settingsKey = `${extensionName}`;
+  const drawerId = `${settingsKey}-settings-drawer`;
+
+  function render() {
+    if (doc.getElementById(drawerId)) return; // already added
+    const container = doc.getElementById(`${settingsKey}-container`) || doc.getElementById('extensions_settings2');
+    if (!container) return;
+
+    // Drawer structure mirrors ST style
+    const drawer = doc.createElement('div');
+    drawer.id = drawerId;
+    drawer.classList.add('inline-drawer');
+
+    const toggle = doc.createElement('div');
+    toggle.classList.add('inline-drawer-toggle','inline-drawer-header');
+    const title = doc.createElement('b'); title.textContent = 'STRES';
+    const icon = doc.createElement('div'); icon.classList.add('inline-drawer-icon','fa-solid','fa-circle-chevron-down','down');
+    toggle.append(title, icon);
+
+    const content = doc.createElement('div');
+    content.classList.add('inline-drawer-content');
+
+    // Form fields
+    const fld = (labelText, inputEl) => {
+      const wrap = doc.createElement('div'); wrap.style.margin = '6px 0';
+      const label = doc.createElement('label'); label.textContent = labelText; label.style.display='block'; label.style.fontSize='12px'; label.style.opacity='0.8';
+      wrap.append(label, inputEl); return wrap;
+    };
+    const api = doc.createElement('input'); api.type = 'text'; api.id = 'stres-em-api-url'; api.placeholder = 'http://localhost:3001'; api.style.width='100%';
+    const camp = doc.createElement('input'); camp.type = 'text'; camp.id = 'stres-em-campaign-id'; camp.placeholder = 'default-campaign'; camp.style.width='100%';
+    const chr = doc.createElement('input'); chr.type = 'text'; chr.id = 'stres-em-character-id'; chr.placeholder = '0000-...'; chr.style.width='100%';
+
+    // Buttons
+    const actions = doc.createElement('div'); actions.style.display='flex'; actions.style.gap='8px'; actions.style.marginTop='8px';
+    const btnTest = doc.createElement('button'); btnTest.className='menu_button'; btnTest.textContent='Test Connection';
+    const btnSave = doc.createElement('button'); btnSave.className='menu_button'; btnSave.textContent='Save';
+    const btnReset = doc.createElement('button'); btnReset.className='menu_button'; btnReset.textContent='Reset';
+    actions.append(btnTest, btnReset, btnSave);
+
+    const note = doc.createElement('div'); note.id='stres-em-note'; note.style.fontSize='12px'; note.style.opacity='0.8'; note.style.marginTop='6px';
+
+    content.append(
+      fld('API Base URL', api),
+      fld('Campaign ID', camp),
+      fld('Character ID', chr),
+      actions,
+      note
+    );
+
+    drawer.append(toggle, content);
+    container.append(drawer);
+
+    // Toggle handling
+    toggle.addEventListener('click', function(){
+      this.classList.toggle('open');
+      icon.classList.toggle('down');
+      icon.classList.toggle('up');
+      content.classList.toggle('open');
+    });
+
+    // Load current settings
+    function refresh() {
+      const s = (window.extension_settings?.[extensionName]) || {};
+      api.value = s.serverUrl || defaultSettings.serverUrl;
+      camp.value = s.campaignId || '';
+      chr.value = s.characterId || '';
+    }
+    refresh();
+
+    // Actions
+    btnReset.addEventListener('click', () => { refresh(); note.textContent = 'Defaults restored (not saved).'; });
+    btnSave.addEventListener('click', () => {
+      const s = window.extension_settings || (window.SillyTavern?.getContext?.().extensionSettings);
+      s[extensionName] = s[extensionName] || {};
+      s[extensionName].serverUrl = (api.value || '').trim().replace(/\/$/, '') || defaultSettings.serverUrl;
+      s[extensionName].campaignId = (camp.value || '').trim() || null;
+      s[extensionName].characterId = (chr.value || '').trim() || null;
+      try { if (stresClient) stresClient.baseUrl = s[extensionName].serverUrl; } catch {}
+      try { const ctx = window.SillyTavern?.getContext?.(); (ctx?.saveSettingsDebounced || window.saveSettingsDebounced)?.(); } catch {}
+      try { window.STRES?.refreshSettingsUI?.(); } catch {}
+      note.textContent = 'Settings saved.';
+    });
+    btnTest.addEventListener('click', async () => {
+      const url = (api.value || '').trim().replace(/\/$/, '');
+      try {
+        const res = await fetch((url||'http://localhost:3001') + '/health');
+        note.textContent = res.ok ? 'Healthy' : `HTTP ${res.status}`;
+      } catch (e) { note.textContent = String(e?.message || e); }
+    });
+  }
+
+  // Try now and observe DOM for when settings panel mounts
+  render();
+  if (!document.getElementById('extensions_settings2')) {
+    const obs = new MutationObserver(() => {
+      if (document.getElementById('extensions_settings2')) { try { render(); } catch {} obs.disconnect(); }
+    });
+    obs.observe(document.body, { childList:true, subtree:true });
+  }
 }
