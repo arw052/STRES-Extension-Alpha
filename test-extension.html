@@ -1,0 +1,144 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>STRES Extension Test</title>
+    <style>
+        body {
+            font-family: Arial, sans-serif;
+            max-width: 800px;
+            margin: 0 auto;
+            padding: 20px;
+            background: #f5f5f5;
+        }
+        .test-section {
+            background: white;
+            padding: 20px;
+            margin: 20px 0;
+            border-radius: 8px;
+            box-shadow: 0 2px 4px rgba(0,0,0,0.1);
+        }
+        .command-list {
+            background: #f8f9fa;
+            padding: 15px;
+            border-radius: 4px;
+            margin: 10px 0;
+        }
+        .command {
+            font-family: monospace;
+            background: #e9ecef;
+            padding: 2px 4px;
+            border-radius: 3px;
+            margin: 2px;
+        }
+        .status-indicator {
+            display: inline-block;
+            width: 12px;
+            height: 12px;
+            border-radius: 50%;
+            margin-right: 8px;
+        }
+        .status-green { background: #28a745; }
+        .status-yellow { background: #ffc107; }
+        .status-red { background: #dc3545; }
+    </style>
+</head>
+<body>
+    <h1>🧪 STRES Extension Test Page</h1>
+
+    <div class="test-section">
+        <h2>Extension Status</h2>
+        <p><span class="status-indicator status-yellow"></span>Waiting for SillyTavern to load extension...</p>
+        <p>Check the browser console for these messages:</p>
+        <ul>
+            <li><code>[STRES] Extension starting...</code></li>
+            <li><code>[STRES] Using modern SlashCommandParser method</code></li>
+            <li><code>[STRES] Slash commands registered successfully</code></li>
+            <li><code>[STRES] Extension initialized successfully</code></li>
+        </ul>
+    </div>
+
+    <div class="test-section">
+        <h2>Test Commands</h2>
+        <p>Once loaded, test these commands in SillyTavern chat:</p>
+
+        <div class="command-list">
+            <h3>Status Commands</h3>
+            <p><span class="command">/stres status</span> - Shows extension status and backend connection</p>
+            <p><span class="command">/stres help</span> - Shows available commands</p>
+            <p><span class="command">/stres campaign</span> - Shows campaign information</p>
+        </div>
+
+        <div class="command-list">
+            <h3>Inventory Commands</h3>
+            <p><span class="command">/inventory show</span> - Display current inventory</p>
+            <p><span class="command">/inventory add sword 1</span> - Add item to inventory</p>
+            <p><span class="command">/inventory remove sword 1</span> - Remove item from inventory</p>
+            <p><span class="command">/inventory use potion</span> - Use an item</p>
+        </div>
+
+        <div class="command-list">
+            <h3>Combat Commands</h3>
+            <p><span class="command">/combat status</span> - Show combat status</p>
+            <p><span class="command">/combat act attack goblin</span> - Submit combat action</p>
+        </div>
+    </div>
+
+    <div class="test-section">
+        <h2>Expected Behavior</h2>
+
+        <h3>When Backend is NOT Running</h3>
+        <ul>
+            <li>✅ Commands are recognized (no "unknown command" error)</li>
+            <li>✅ Status shows "API: http://localhost:3001 (unreachable)"</li>
+            <li>✅ Inventory/combat commands show "(simulated)" messages</li>
+            <li>✅ Extension reports "Extension: Loaded ✅"</li>
+        </ul>
+
+        <h3>When Backend IS Running</h3>
+        <ul>
+            <li>✅ API status shows "healthy"</li>
+            <li>✅ Real inventory data is displayed</li>
+            <li>✅ WebSocket connects automatically</li>
+            <li>✅ Real-time updates work</li>
+        </ul>
+    </div>
+
+    <div class="test-section">
+        <h2>Troubleshooting</h2>
+
+        <h3>If Commands Don't Work</h3>
+        <ol>
+            <li>Check browser console for error messages</li>
+            <li>Look for <code>[STRES]</code> messages</li>
+            <li>Verify extension is properly installed in SillyTavern</li>
+            <li>Try refreshing the page</li>
+        </ol>
+
+        <h3>If Extension Doesn't Load</h3>
+        <ol>
+            <li>Check that manifest.json has correct format</li>
+            <li>Verify extension files are in the right location</li>
+            <li>Check SillyTavern's extension directory structure</li>
+            <li>Look for JavaScript errors in console</li>
+        </ol>
+    </div>
+
+    <script>
+        // Simple test to check if extension is loaded
+        setTimeout(() => {
+            const statusIndicator = document.querySelector('.status-indicator');
+            const statusText = document.querySelector('.status-indicator').nextSibling;
+
+            if (window.STRES) {
+                statusIndicator.className = 'status-indicator status-green';
+                statusText.textContent = 'Extension detected! STRES object found.';
+            } else {
+                statusIndicator.className = 'status-indicator status-red';
+                statusText.textContent = 'Extension not detected. Check SillyTavern installation.';
+            }
+        }, 2000);
+    </script>
+</body>
+</html>

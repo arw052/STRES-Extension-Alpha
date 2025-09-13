@@ -1,7 +1,11 @@
 {
-  "name": "STRES Extension Alpha",
+  "display_name": "STRES Extension Alpha",
+  "loading_order": 10,
+  "requires": [],
+  "optional": [],
+  "js": "index.js",
+  "css": "styles/base.css",
+  "author": "STRES Team",
   "version": "0.1.2",
-  "entry": "index.js",
-  "description": "STRES UI, quickbar, inventory hooks, and SillyTavern integration.",
-  "author": "STRES Team"
+  "description": "STRES UI, quickbar, inventory hooks, and SillyTavern integration."
 }

@@ -1,7 +1,373 @@
 // STRES Extension Entry
 // Mounts UI components and wires SillyTavern integration without blocking chat.
 
-(function initStresUI() {
+// STRES Extension Configuration
+const extensionName = "stres";
+const defaultSettings = {
+  serverUrl: "http://localhost:3001",
+  campaignId: null,
+  chatCampaigns: {},
+  autoInjection: {
+    enabled: true,
+    mode: "basic",
+    frequency: "every_message"
+  },
+  ui: {
+    theme: "fantasy",
+    showHUD: true,
+    panelPosition: "right"
+  }
+};
+
+// Global STRES object
+let stresClient;
+let characterPanel;
+let autoInjector;
+let commandProcessor;
+let toolIntegration;
+let lorebookManager;
+let characterCardManager;
+let worldMapViewer;
+
+// STRES API Client
+class STRESClient {
+  constructor(baseUrl) {
+    this.baseUrl = baseUrl;
+    this.apiPrefix = '/api';
+  }
+
+  async request(endpoint, options = {}) {
+    const url = `${this.baseUrl}${this.apiPrefix}${endpoint}`;
+    const response = await fetch(url, {
+      ...options,
+      headers: {
+        'Content-Type': 'application/json',
+        ...options.headers
+      }
+    });
+
+    if (!response.ok) {
+      throw new Error(`API request failed: ${response.statusText}`);
+    }
+
+    return response.json();
+  }
+
+  async getHealth() {
+    try {
+      return await this.request('/health');
+    } catch (error) {
+      return { status: 'unreachable', error: error.message };
+    }
+  }
+}
+
+// STRES Chat Integration
+const STRESChat = {
+  processMessage(message) {
+    // Check for inventory commands
+    if (message.startsWith('/inventory') || message.startsWith('/inv')) {
+      this.handleInventoryCommand(message);
+      return true; // Prevent default handling
+    }
+
+    // Check for combat commands
+    if (message.startsWith('/combat')) {
+      this.handleCombatCommand(message);
+      return true;
+    }
+
+    // Check for STRES commands
+    if (message.startsWith('/stres')) {
+      this.handleStresCommand(message);
+      return true;
+    }
+
+    return false;
+  },
+
+  handleInventoryCommand(command) {
+    const parts = command.split(' ');
+    const action = parts[1];
+
+    switch(action) {
+      case 'show':
+      case 'list':
+        this.showInventory();
+        break;
+      case 'add':
+        this.addItem(parts.slice(2).join(' '));
+        break;
+      case 'remove':
+        this.removeItem(parts.slice(2).join(' '));
+        break;
+      case 'use':
+        this.useItem(parts.slice(2).join(' '));
+        break;
+      default:
+        this.showHelp();
+    }
+  },
+
+  handleStresCommand(command) {
+    const parts = command.split(' ');
+    const action = parts[1];
+
+    switch(action) {
+      case 'status':
+        this.showStatus();
+        break;
+      case 'join':
+        this.rejoinWebSocket();
+        break;
+      case 'campaign':
+        this.showCampaign();
+        break;
+      case 'settings':
+        window.STRES?.toggleSettings?.();
+        break;
+      default:
+        this.showHelp();
+    }
+  },
+
+  async showStatus() {
+    const settings = window.extension_settings?.[extensionName] || {};
+    const apiBase = settings.serverUrl || defaultSettings.serverUrl;
+    let apiStatus = 'checking...';
+
+    try {
+      const health = await fetch(`${apiBase}/health`);
+      if (health.ok) {
+        apiStatus = 'healthy';
+      } else {
+        apiStatus = `error: ${health.status}`;
+      }
+    } catch (_) {
+      apiStatus = 'unreachable';
+    }
+
+    const message = `
+**STRES Status**
+• Version: 0.1.2
+• API: ${apiBase} (${apiStatus})
+• Campaign ID: ${settings.campaignId || 'None'}
+• Character ID: ${settings.characterId || 'None'}
+• Extension: Loaded ✅
+    `.trim();
+
+    this.sendToChat(message);
+  },
+
+  showHelp() {
+    const message = `
+**STRES Commands**
+• /inventory show - Display inventory
+• /inventory add [item] - Add item
+• /inventory remove [item] - Remove item
+• /inventory use [item] - Use item
+• /stres status - Show STRES status
+• /stres join - Reconnect WebSocket
+• /stres campaign - Show campaign info
+• /stres settings - Toggle settings panel
+    `.trim();
+
+    this.sendToChat(message);
+  },
+
+  rejoinWebSocket() {
+    this.sendToChat('🔄 WebSocket reconnection requested');
+  },
+
+  showCampaign() {
+    const settings = window.extension_settings?.[extensionName] || {};
+    const message = `
+**Campaign Info**
+• Campaign ID: ${settings.campaignId || 'None'}
+• Server URL: ${settings.serverUrl || defaultSettings.serverUrl}
+    `.trim();
+
+    this.sendToChat(message);
+  },
+
+  async addItem(argStr) {
+    const parts = argStr.trim().split(/\s+/);
+    const itemId = parts[0];
+    const quantity = parts[1] ? parseInt(parts[1], 10) : 1;
+    if (!itemId) {
+      this.sendToChat('Usage: /inventory add <itemId> <quantity?>');
+      return;
+    }
+    this.sendToChat(`✅ Added ${quantity} ${itemId} (simulated)`);
+  },
+
+  async removeItem(argStr) {
+    const parts = argStr.trim().split(/\s+/);
+    const itemId = parts[0];
+    const quantity = parts[1] ? parseInt(parts[1], 10) : 1;
+    if (!itemId) {
+      this.sendToChat('Usage: /inventory remove <itemId> <quantity?>');
+      return;
+    }
+    this.sendToChat(`✅ Removed ${quantity} ${itemId} (simulated)`);
+  },
+
+  async useItem(argStr) {
+    const itemId = argStr.trim();
+    if (!itemId) {
+      this.sendToChat('Usage: /inventory use <itemId>');
+      return;
+    }
+    this.sendToChat(`⚔️ Used ${itemId} (simulated)`);
+  },
+
+  showInventory() {
+    const message = `
+**Inventory**
+• Sample Item 1 (5)
+• Sample Item 2 (2)
+• Sample Item 3 (1)
+*Note: Connect to STRES backend for real inventory*
+    `.trim();
+
+    this.sendToChat(message);
+  },
+
+  handleCombatCommand(command) {
+    const parts = command.split(' ');
+    const subcommand = parts[1];
+
+    switch(subcommand) {
+      case 'act':
+        this.handleCombatAct(parts.slice(2));
+        break;
+      case 'status':
+        this.showCombatStatus();
+        break;
+      default:
+        this.sendToChat('**Combat Commands:**\n• /combat act attack <targetId> - Submit attack action\n• /combat status - Show current combat state');
+    }
+  },
+
+  handleCombatAct(args) {
+    if (args.length < 2 || args[0] !== 'attack') {
+      this.sendToChat('Usage: /combat act attack <targetId>');
+      return;
+    }
+
+    const targetId = args[1];
+    this.sendToChat(`⚔️ Combat action: Attack ${targetId} (simulated)`);
+  },
+
+  showCombatStatus() {
+    this.sendToChat('**Combat Status**\n• Active: No\n• Current Turn: None\n*Note: Connect to STRES backend for real combat*');
+  },
+
+  sendToChat(message) {
+    // Try to use SillyTavern's chat system if available
+    if (window.SillyTavern && typeof window.SillyTavern.sendSystemMessage === 'function') {
+      window.SillyTavern.sendSystemMessage(message);
+    } else {
+      // Fallback to console
+      console.log('[STRES]', message);
+      // Try to insert into chat manually
+      const chatContainer = document.querySelector('#chat');
+      if (chatContainer) {
+        const messageElement = document.createElement('div');
+        messageElement.className = 'mes stres-message';
+        messageElement.innerHTML = `<div class="mes_text">${message.replace(/\n/g, '<br>')}</div>`;
+        chatContainer.appendChild(messageElement);
+      }
+    }
+  }
+};
+
+// Main initialization function
+async function initializeExtension() {
+  console.log("[STRES] Extension starting...");
+
+  // Wait for SillyTavern to be ready
+  if (typeof window.SillyTavern === 'undefined') {
+    console.warn('[STRES] SillyTavern not found. Extension may not work properly.');
+  }
+
+  // Initialize settings
+  const context = window.SillyTavern?.getContext?.() || {};
+  const extensionSettings = context.extensionSettings || window.extension_settings || {};
+
+  if (!extensionSettings[extensionName]) {
+    extensionSettings[extensionName] = structuredClone(defaultSettings);
+    if (context.saveSettingsDebounced) {
+      context.saveSettingsDebounced();
+    }
+  }
+
+  // Initialize STRES client
+  stresClient = new STRESClient(extensionSettings[extensionName].serverUrl);
+
+  // Make settings globally accessible
+  window.extension_settings = extensionSettings;
+
+  // Register slash commands
+  registerSlashCommands(context);
+
+  // Initialize UI components
+  initializeUI();
+
+  console.log("[STRES] Extension initialized successfully");
+}
+
+// Register slash commands with SillyTavern
+function registerSlashCommands(context) {
+  const registerSlashCommand = context.registerSlashCommand || window.registerSlashCommand;
+  const SlashCommandParser = context.SlashCommandParser || window.SlashCommandParser;
+  const SlashCommand = context.SlashCommand || window.SlashCommand;
+
+  if (typeof SlashCommandParser !== 'undefined' && typeof SlashCommand !== 'undefined') {
+    console.log("[STRES] Using modern SlashCommandParser method");
+
+    // Register all STRES commands
+    SlashCommandParser.addCommandObject(SlashCommand.fromProps({
+      name: 'stres',
+      callback: (args) => STRESChat.handleStresCommand('/stres ' + args.join(' ')),
+      helpString: 'STRES main commands - status, join, campaign, settings'
+    }));
+
+    SlashCommandParser.addCommandObject(SlashCommand.fromProps({
+      name: 'stres_status',
+      callback: () => STRESChat.showStatus(),
+      helpString: 'Show STRES status and current campaign info'
+    }));
+
+    SlashCommandParser.addCommandObject(SlashCommand.fromProps({
+      name: 'inventory',
+      callback: (args) => STRESChat.handleInventoryCommand('/inventory ' + args.join(' ')),
+      helpString: 'Inventory management - show, add, remove, use'
+    }));
+
+    SlashCommandParser.addCommandObject(SlashCommand.fromProps({
+      name: 'combat',
+      callback: (args) => STRESChat.handleCombatCommand('/combat ' + args.join(' ')),
+      helpString: 'Combat commands - act, status'
+    }));
+
+    console.log("[STRES] Slash commands registered successfully using SlashCommandParser");
+  } else if (typeof registerSlashCommand === 'function') {
+    console.log("[STRES] Using legacy registerSlashCommand function");
+
+    registerSlashCommand('stres', (args) => STRESChat.handleStresCommand('/stres ' + args.join(' ')), [], 'STRES main commands', true, true);
+    registerSlashCommand('stres_status', () => STRESChat.showStatus(), [], 'Show STRES status', true, true);
+    registerSlashCommand('inventory', (args) => STRESChat.handleInventoryCommand('/inventory ' + args.join(' ')), [], 'Inventory management', true, true);
+    registerSlashCommand('combat', (args) => STRESChat.handleCombatCommand('/combat ' + args.join(' ')), [], 'Combat commands', true, true);
+
+    console.log("[STRES] Slash commands registered successfully using registerSlashCommand");
+  } else {
+    console.error("[STRES] No slash command registration method found");
+  }
+}
+
+// Initialize UI components
+function initializeUI() {
   const doc = document;
   const rootId = 'stres-extension-root';
 
@@ -12,45 +378,6 @@
   root.setAttribute('data-theme', 'auto');
   root.style.position = 'relative';
   doc.body.appendChild(root);
-
-  // Styles - using proper extension paths
-  const extensionPath = '/scripts/extensions/third-party/STRES-Extension-Alpha';
-  
-  const link = doc.createElement('link');
-  link.rel = 'stylesheet';
-  link.href = `${extensionPath}/styles/base.css`;
-  doc.head.appendChild(link);
-  const linkSettings = doc.createElement('link');
-  linkSettings.rel = 'stylesheet';
-  linkSettings.href = `${extensionPath}/styles/settings.css`;
-  doc.head.appendChild(linkSettings);
-  const linkQuick = doc.createElement('link');
-  linkQuick.rel = 'stylesheet';
-  linkQuick.href = `${extensionPath}/styles/quickbar.css`;
-  doc.head.appendChild(linkQuick);
-  const linkInventory = doc.createElement('link');
-  linkInventory.rel = 'stylesheet';
-  linkInventory.href = `${extensionPath}/styles/inventory.css`;
-  doc.head.appendChild(linkInventory);
-  // Import UI removed - using folder-based system instead
-
-  // Load runtime (precompiled) UI logic if available
-  const runtimeScript = doc.createElement('script');
-  runtimeScript.src = `${extensionPath}/ui/runtime.js`;
-  runtimeScript.defer = true;
-  doc.head.appendChild(runtimeScript);
-  
-  // Load inventory system
-  const inventoryScript = doc.createElement('script');
-  inventoryScript.type = 'module';
-  inventoryScript.src = `${extensionPath}/ui/inventory/integration/SillyTavernHooks.js`;
-  inventoryScript.defer = true;
-  doc.head.appendChild(inventoryScript);
-
-  // Lazy-load TypeScript-built modules if available; otherwise fallback to precompiled JS shims
-  // Note: In this skeleton we attach modules on window.STRES until a bundler is configured.
-  const w = /** @type {Window & { STRES?: any }} */ (window);
-  if (!w.STRES) w.STRES = {};
 
   // Simple mounting of components in DOM containers
   const quickBarHost = doc.createElement('div');
@@ -65,36 +392,47 @@
   combatHost.id = 'stres-combat-host';
   root.appendChild(combatHost);
 
-  // Import host removed - using folder-based system
-
-  // Import UMD-like shims if present
-  // These shims are generated from TypeScript sources and attached to window.STRES
-  const init = () => {
-    const { mountQuickBar, mountSettingsPanel, mountImportUI } = w.STRES || {};
-    if (typeof mountQuickBar === 'function') {
-      mountQuickBar('#stres-quickbar-host');
-    }
-    if (typeof mountSettingsPanel === 'function') {
-      // Start hidden; toggled via a button in the quickbar
-      mountSettingsPanel('#stres-settings-host', { startHidden: true });
-    }
-    // Import UI removed - using folder-based system
-  };
-
-  // Defer to idle so we don’t block chat
-  if ('requestIdleCallback' in window) {
-    window.requestIdleCallback(init);
-  } else {
-    setTimeout(init, 0);
-  }
-
   // Expose a minimal API to toggle settings
-  w.STRES.toggleSettings = () => {
+  window.STRES = window.STRES || {};
+  window.STRES.toggleSettings = () => {
     const panel = doc.querySelector('#stres-settings-host .stres-settings-panel');
     if (!panel) return;
     const hidden = panel.getAttribute('aria-hidden') === 'true';
     panel.setAttribute('aria-hidden', hidden ? 'false' : 'true');
   };
 
-  // Import functions removed - using folder-based system with file watcher
-})();
+  console.log("[STRES] UI components initialized");
+}
+
+// Hook into chat input for additional processing
+function hookChatInput() {
+  const chatForm = document.querySelector('#send_form');
+  if (chatForm) {
+    const originalSubmit = chatForm.onsubmit;
+    chatForm.onsubmit = function(e) {
+      const input = document.querySelector('#send_textarea');
+      if (input && STRESChat.processMessage(input.value)) {
+        e.preventDefault();
+        input.value = '';
+        return false;
+      }
+      if (originalSubmit) {
+        return originalSubmit.call(this, e);
+      }
+    };
+    console.log("[STRES] Chat input hooked successfully");
+  }
+}
+
+// Initialize when DOM is ready
+if (document.readyState === 'loading') {
+  document.addEventListener('DOMContentLoaded', () => {
+    initializeExtension().then(() => {
+      setTimeout(hookChatInput, 1000); // Delay to ensure SillyTavern is fully loaded
+    });
+  });
+} else {
+  initializeExtension().then(() => {
+    setTimeout(hookChatInput, 1000);
+  });
+}
