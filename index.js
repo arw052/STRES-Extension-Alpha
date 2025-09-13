@@ -19,6 +19,9 @@ const defaultSettings = {
   }
 };
 
+// Override default to match current backend port
+defaultSettings.serverUrl = "http://localhost:3001";
+
 // Global STRES object
 let stresClient;
 let characterPanel;
@@ -126,6 +129,15 @@ const STRESChat = {
       case 'settings':
         window.STRES?.toggleSettings?.();
         break;
+      case 'reset':
+        this.resetSettings();
+        break;
+      case 'debug':
+        this.showDebugInfo();
+        break;
+      case 'fixport':
+        this.fixPortConfiguration();
+        break;
       default:
         this.showHelp();
     }
@@ -139,24 +151,65 @@ const STRESChat = {
     try {
       const health = await fetch(`${apiBase}/health`);
       if (health.ok) {
-        apiStatus = 'healthy';
+        const data = await health.json();
+        apiStatus = `healthy (${data.version || 'unknown'})`;
       } else {
         apiStatus = `error: ${health.status}`;
       }
-    } catch (_) {
-      apiStatus = 'unreachable';
+    } catch (error) {
+      apiStatus = `unreachable (${error.message})`;
     }
 
     const message = `
 **STRES Status**
 • Version: 0.1.2
 • API: ${apiBase} (${apiStatus})
+• Default API: ${defaultSettings.serverUrl}
+• Settings API: ${settings.serverUrl || 'not set'}
 • Campaign ID: ${settings.campaignId || 'None'}
 • Character ID: ${settings.characterId || 'None'}
 • Extension: Loaded ✅
     `.trim();
 
     this.sendToChat(message);
+  },
+
+  resetSettings() {
+    if (window.extension_settings) {
+      window.extension_settings[extensionName] = structuredClone(defaultSettings);
+      this.sendToChat('✅ STRES settings reset to defaults');
+    } else {
+      this.sendToChat('❌ Cannot reset settings - extension_settings not available');
+    }
+  },
+
+  showDebugInfo() {
+    const settings = window.extension_settings?.[extensionName] || {};
+    const debugMessage = `
+**STRES Debug Info**
+• Extension Name: ${extensionName}
+• Window.STRES: ${typeof window.STRES}
+• Extension Settings: ${typeof window.extension_settings}
+• STRES Settings: ${typeof settings}
+• Current API URL: ${settings.serverUrl || 'not set'}
+• Default API URL: ${defaultSettings.serverUrl}
+• Settings Keys: ${Object.keys(settings).join(', ')}
+    `.trim();
+
+    this.sendToChat(debugMessage);
+  },
+
+  fixPortConfiguration() {
+    if (window.extension_settings) {
+      if (!window.extension_settings[extensionName]) {
+        window.extension_settings[extensionName] = {};
+      }
+      window.extension_settings[extensionName].serverUrl = "http://localhost:3001";
+      this.sendToChat('✅ STRES API URL fixed to http://localhost:3001');
+      this.sendToChat('🔄 Try /stres status again to test the connection');
+    } else {
+      this.sendToChat('❌ Cannot fix port - extension_settings not available');
+    }
   },
 
   showHelp() {
@@ -170,6 +223,9 @@ const STRESChat = {
 • /stres join - Reconnect WebSocket
 • /stres campaign - Show campaign info
 • /stres settings - Toggle settings panel
+• /stres reset - Reset settings to defaults
+• /stres debug - Show debug information
+• /stres fixport - Fix API port configuration
     `.trim();
 
     this.sendToChat(message);
@@ -330,7 +386,7 @@ function registerSlashCommands(context) {
     SlashCommandParser.addCommandObject(SlashCommand.fromProps({
       name: 'stres',
       callback: (args) => STRESChat.handleStresCommand('/stres ' + args.join(' ')),
-      helpString: 'STRES main commands - status, join, campaign, settings'
+      helpString: 'STRES main commands - status, join, campaign, settings, reset, debug, fixport'
     }));
 
     SlashCommandParser.addCommandObject(SlashCommand.fromProps({
@@ -355,7 +411,7 @@ function registerSlashCommands(context) {
   } else if (typeof registerSlashCommand === 'function') {
     console.log("[STRES] Using legacy registerSlashCommand function");
 
-    registerSlashCommand('stres', (args) => STRESChat.handleStresCommand('/stres ' + args.join(' ')), [], 'STRES main commands', true, true);
+    registerSlashCommand('stres', (args) => STRESChat.handleStresCommand('/stres ' + args.join(' ')), [], 'STRES main commands - status, join, campaign, settings, reset, debug, fixport', true, true);
     registerSlashCommand('stres_status', () => STRESChat.showStatus(), [], 'Show STRES status', true, true);
     registerSlashCommand('inventory', (args) => STRESChat.handleInventoryCommand('/inventory ' + args.join(' ')), [], 'Inventory management', true, true);
     registerSlashCommand('combat', (args) => STRESChat.handleCombatCommand('/combat ' + args.join(' ')), [], 'Combat commands', true, true);
