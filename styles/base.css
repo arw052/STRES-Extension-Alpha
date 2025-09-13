@@ -48,3 +48,134 @@
   overflow: hidden; clip: rect(0, 0, 0, 0); white-space: nowrap; border: 0;
 }
 
+/* Combat Panel Styles */
+#stres-combat-panel {
+  position: fixed;
+  top: 20px;
+  right: 20px;
+  width: 300px;
+  background: var(--stres-surface);
+  border: 1px solid var(--stres-border);
+  border-radius: var(--stres-radius);
+  box-shadow: 0 4px 12px rgba(0, 0, 0, 0.3);
+  z-index: 1000;
+  font-family: inherit;
+  font-size: 14px;
+}
+
+.stres-combat-header {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  padding: 12px 16px;
+  border-bottom: 1px solid var(--stres-border);
+  background: var(--stres-bg);
+  border-radius: var(--stres-radius) var(--stres-radius) 0 0;
+}
+
+.stres-combat-header h3 {
+  margin: 0;
+  color: var(--stres-text);
+  font-size: 16px;
+  font-weight: 600;
+}
+
+.stres-combat-toggle {
+  background: none;
+  border: none;
+  color: var(--stres-muted);
+  cursor: pointer;
+  font-size: 16px;
+  padding: 4px;
+  border-radius: 4px;
+  transition: color 0.2s;
+}
+
+.stres-combat-toggle:hover {
+  color: var(--stres-text);
+}
+
+.stres-combat-content {
+  padding: 16px;
+}
+
+.stres-combat-status {
+  display: flex;
+  justify-content: space-between;
+  margin-bottom: 12px;
+  padding: 8px;
+  background: var(--stres-bg);
+  border-radius: var(--stres-radius-sm);
+}
+
+.stres-combat-round,
+.stres-combat-turn {
+  font-size: 13px;
+  color: var(--stres-muted);
+}
+
+.stres-combat-round span,
+.stres-combat-turn span {
+  color: var(--stres-text);
+  font-weight: 500;
+}
+
+.stres-combat-actions {
+  margin-bottom: 12px;
+}
+
+.stres-combat-btn {
+  width: 100%;
+  padding: 8px 12px;
+  background: var(--stres-accent);
+  color: white;
+  border: none;
+  border-radius: var(--stres-radius-sm);
+  cursor: pointer;
+  font-size: 14px;
+  transition: background-color 0.2s;
+}
+
+.stres-combat-btn:hover:not(:disabled) {
+  background: #5a8fd6;
+}
+
+.stres-combat-btn:disabled {
+  background: var(--stres-muted);
+  cursor: not-allowed;
+  opacity: 0.6;
+}
+
+.stres-combat-log {
+  max-height: 150px;
+  overflow-y: auto;
+  border: 1px solid var(--stres-border);
+  border-radius: var(--stres-radius-sm);
+  background: var(--stres-bg);
+  padding: 8px;
+}
+
+.stres-combat-log-entry {
+  padding: 4px 0;
+  font-size: 12px;
+  line-height: 1.4;
+  border-bottom: 1px solid rgba(255, 255, 255, 0.05);
+}
+
+.stres-combat-log-entry:last-child {
+  border-bottom: none;
+}
+
+.stres-combat-log-entry.system {
+  color: var(--stres-accent);
+  font-style: italic;
+}
+
+.stres-combat-log-entry.action {
+  color: #4ade80;
+}
+
+.stres-combat-log-entry.error {
+  color: var(--stres-danger);
+}
+

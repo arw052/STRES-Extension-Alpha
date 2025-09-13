@@ -8,6 +8,9 @@
     
     const STRES = window.STRES || {};
     window.STRES = STRES;
+
+    // Load compiled modules
+    window.STRES_COMPILED = {};
     
     // Quickbar Component
     STRES.mountQuickBar = function(selector) {
@@ -81,7 +84,15 @@
                         <h3>API Configuration</h3>
                         <label class="stres-setting-input">
                             <span>Backend URL:</span>
-                            <input type="text" id="stres-api-url" value="http://localhost:3000" placeholder="http://localhost:3000">
+                            <input type="text" id="stres-api-url" value="http://localhost:3001" placeholder="http://localhost:3001">
+                        </label>
+                        <label class="stres-setting-input">
+                            <span>Campaign ID:</span>
+                            <input type="text" id="stres-campaign-id" value="default-campaign" placeholder="default-campaign">
+                        </label>
+                        <label class="stres-setting-input">
+                            <span>Character ID:</span>
+                            <input type="text" id="stres-character-id" value="22222222-2222-2222-2222-222222222222" placeholder="Character UUID">
                         </label>
                         <button class="stres-btn stres-btn-primary" id="stres-test-connection">Test Connection</button>
                     </div>
@@ -126,12 +137,12 @@
         testBtn?.addEventListener('click', async () => {
             testBtn.disabled = true;
             testBtn.textContent = 'Testing...';
-            
+
             try {
                 const url = document.querySelector('#stres-api-url').value;
-                const response = await fetch(`${url}/api/health`);
+                const response = await fetch(`${url}/health`);
                 const data = await response.json();
-                
+
                 if (data.status === 'healthy') {
                     testBtn.textContent = '✅ Connected';
                     showNotification('API connection successful!', 'success');
@@ -278,16 +289,30 @@
             showQuickbar: document.querySelector('#stres-show-quickbar')?.checked,
             enableNotifications: document.querySelector('#stres-enable-notifications')?.checked,
             apiUrl: document.querySelector('#stres-api-url')?.value,
+            campaignId: document.querySelector('#stres-campaign-id')?.value,
+            characterId: document.querySelector('#stres-character-id')?.value,
             debugMode: document.querySelector('#stres-debug-mode')?.checked,
             campaign: document.querySelector('#stres-campaign-select')?.value
         };
-        
+
         localStorage.setItem('stres-settings', JSON.stringify(settings));
-        
-        // Apply settings
-        if (STRES.state) {
-            STRES.state.settings = settings;
+
+        // Apply settings to STRES if available
+        if (window.STRES) {
+            if (window.STRES.state) {
+                window.STRES.state.settings = settings;
+            }
+
+            // Update STRES settings manager if available
+            if (window.STRES.api && window.STRES.api.getApiBase) {
+                // This will trigger a reconnection if API base changed
+                if (settings.apiUrl && settings.apiUrl !== window.STRES.api.getApiBase()) {
+                    console.log('[STRES] API base changed, may need restart');
+                }
+            }
         }
+
+        showNotification('Settings saved!', 'success');
     }
     
     function loadSettings() {
@@ -304,15 +329,21 @@
                 '#stres-enable-notifications': settings.enableNotifications,
                 '#stres-debug-mode': settings.debugMode
             };
-            
+
             for (const [selector, value] of Object.entries(elements)) {
                 const el = document.querySelector(selector);
                 if (el) el.checked = value;
             }
-            
+
             const apiUrl = document.querySelector('#stres-api-url');
-            if (apiUrl) apiUrl.value = settings.apiUrl || 'http://localhost:3000';
-            
+            if (apiUrl) apiUrl.value = settings.apiUrl || 'http://localhost:3001';
+
+            const campaignId = document.querySelector('#stres-campaign-id');
+            if (campaignId) campaignId.value = settings.campaignId || 'default-campaign';
+
+            const characterId = document.querySelector('#stres-character-id');
+            if (characterId) characterId.value = settings.characterId || '22222222-2222-2222-2222-222222222222';
+
             const campaign = document.querySelector('#stres-campaign-select');
             if (campaign) campaign.value = settings.campaign || '';
             
@@ -341,13 +372,41 @@
         }
     }
     
+    // Load compiled modules dynamically
+    async function loadModules() {
+        try {
+            // Load WebSocketManager
+            const wsModule = await import('./inventory/core/WebSocketManager.js');
+            window.STRES_COMPILED.WebSocketManager = wsModule.WebSocketManager;
+
+            // Load CombatManager
+            const combatModule = await import('./inventory/core/CombatManager.js');
+            window.STRES_COMPILED.CombatManager = combatModule.CombatManager;
+
+            // Load CombatPanel
+            const panelModule = await import('./inventory/components/CombatPanel.js');
+            window.STRES_COMPILED.CombatPanel = panelModule.CombatPanel;
+
+            // Load ConfigManager
+            const configModule = await import('./inventory/core/ConfigManager.js');
+            window.STRES_CONFIG_MANAGER = configModule.configManager;
+
+            console.log('[STRES] Compiled modules loaded successfully');
+        } catch (error) {
+            console.warn('[STRES] Failed to load compiled modules:', error);
+            console.warn('[STRES] Combat system will be disabled');
+        }
+    }
+
     // Initialize when ready
     if (document.readyState === 'loading') {
-        document.addEventListener('DOMContentLoaded', () => {
+        document.addEventListener('DOMContentLoaded', async () => {
             console.log('[STRES] Runtime loaded');
+            await loadModules();
         });
     } else {
         console.log('[STRES] Runtime loaded');
+        loadModules();
     }
     
 })();

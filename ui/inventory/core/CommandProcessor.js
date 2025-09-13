@@ -448,4 +448,5 @@ class HelpCommand {
 const createCommandProcessor = (inventoryManager, configManager) => {
     return new CommandProcessor(inventoryManager, configManager);
 };
-exports.createCommandProcessor = createCommandProcessor;
+
+export { createCommandProcessor };

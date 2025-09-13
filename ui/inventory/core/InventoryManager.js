@@ -5,39 +5,77 @@ class InventoryManager {
     constructor() {
         this.cache = new Map();
         this.cacheTimeout = 30000;
-        this.apiBase = '/api/inventory';
         this.updateCallbacks = new Set();
         this.currentPlayerId = null;
+        this.wsSubscription = null;
+        this.pollingInterval = null;
+
+        // Get API base from STRES settings if available
+        this.updateApiBase();
+
+        // WebSocket integration with unified service
         this.initializeWebSocket();
     }
-    initializeWebSocket() {
-        try {
-            const wsUrl = `ws://${window.location.host}/api/inventory/ws`;
-            const ws = new WebSocket(wsUrl);
-            ws.onmessage = (event) => {
-                const update = JSON.parse(event.data);
-                this.handleInventoryUpdate(update);
-            };
-            ws.onerror = (error) => {
-                console.warn('Inventory WebSocket error, falling back to polling:', error);
-                this.startPolling();
-            };
-            ws.onclose = () => {
-                setTimeout(() => this.initializeWebSocket(), 5000);
-            };
-        }
-        catch (error) {
-            console.warn('WebSocket not available, using polling:', error);
-            this.startPolling();
+
+    updateApiBase() {
+        if (window.STRES && window.STRES.api) {
+            this.apiBase = window.STRES.api.getApiBase() + '/api/inventory';
+        } else {
+            this.apiBase = 'http://localhost:3001/api/inventory';
         }
     }
+    initializeWebSocket() {
+        // Wait for STRES to be initialized
+        const initWebSocket = () => {
+            if (window.STRES && window.STRES.websocket) {
+                // Subscribe to inventory events from the unified WebSocket service
+                this.wsSubscription = window.STRES.websocket.on('inventory', (event) => {
+                    const { type, data } = event;
+
+                    // Transform unified envelope to inventory update format
+                    let updateType = 'inventory_updated';
+                    if (type === 'inventory.item_added') {
+                        updateType = 'item_added';
+                    } else if (type === 'inventory.item_removed') {
+                        updateType = 'item_removed';
+                    } else if (type === 'inventory.item_used') {
+                        updateType = 'item_used';
+                    }
+
+                    const update = {
+                        type: updateType,
+                        inventory: data.inventory,
+                        itemId: data.itemId,
+                        item: data.item,
+                        timestamp: event.timestamp
+                    };
+
+                    this.handleInventoryUpdate(update);
+                });
+
+                console.log('[InventoryManager] WebSocket integration initialized');
+            } else {
+                // STRES not ready yet, try again
+                setTimeout(initWebSocket, 1000);
+            }
+        };
+
+        initWebSocket();
+    }
     startPolling() {
-        setInterval(async () => {
-            if (this.currentPlayerId) {
+        // Only start polling if WebSocket is not available or disconnected
+        if (this.wsSubscription) {
+            console.log('[InventoryManager] WebSocket available, skipping polling');
+            return;
+        }
+
+        console.log('[InventoryManager] Starting polling fallback (10s interval)');
+        this.pollingInterval = setInterval(async () => {
+            if (this.currentPlayerId && !this.wsSubscription) {
                 const inventory = await this.fetchInventory(this.currentPlayerId);
                 if (inventory) {
                     this.handleInventoryUpdate({
-                        type: 'weight_changed',
+                        type: 'inventory_updated',
                         inventory,
                         timestamp: Date.now()
                     });
@@ -46,7 +84,16 @@ class InventoryManager {
         }, 10000);
     }
     async getPlayerInventory(playerId) {
-        const id = playerId || this.currentPlayerId || 'default';
+        let id = playerId || this.currentPlayerId;
+
+        // If no ID provided, try to get from STRES settings
+        if (!id && window.STRES) {
+            // This would need a way to get character ID from STRES settings
+            // For now, we'll use the default
+            id = 'default';
+        }
+
+        id = id || 'default';
         this.currentPlayerId = id;
         const cached = this.cache.get(id);
         if (cached && Date.now() - cached.timestamp < this.cacheTimeout) {
@@ -102,55 +149,150 @@ class InventoryManager {
             equippedArmor: []
         };
     }
-    async executeAction(action) {
+    async addItem(characterId, itemId, quantity = 1) {
         try {
-            const response = await fetch(`${this.apiBase}/action`, {
+            const response = await fetch(`${this.apiBase}/${characterId}/items`, {
                 method: 'POST',
                 headers: { 'Content-Type': 'application/json' },
-                body: JSON.stringify({
-                    ...action,
-                    playerId: this.currentPlayerId
-                })
+                body: JSON.stringify({ itemId, quantity })
             });
             if (!response.ok) {
-                throw new Error(`Action failed: ${response.status}`);
+                throw new Error(`Failed to add item: ${response.status}`);
             }
             const result = await response.json();
-            if (result.success && result.inventory) {
+            if (result.inventory) {
                 const inventory = this.transformApiData(result.inventory);
-                this.cache.set(this.currentPlayerId, {
+                this.cache.set(characterId, {
                     data: inventory,
                     timestamp: Date.now()
                 });
                 this.handleInventoryUpdate({
-                    type: this.getUpdateType(action.type),
-                    itemId: action.itemId,
+                    type: 'item_added',
+                    itemId,
                     inventory,
                     timestamp: Date.now()
                 });
             }
             return {
-                success: result.success,
-                message: result.message || this.getActionMessage(action, result.success),
+                success: true,
+                message: `Added ${quantity} ${itemId}(s) to inventory`,
+                updatedInventory: result.inventory
+            };
+        }
+        catch (error) {
+            console.error('Failed to add item:', error);
+            return {
+                success: false,
+                message: 'Failed to add item. Please try again.'
+            };
+        }
+    }
+
+    async removeItem(characterId, itemId, quantity = 1) {
+        try {
+            const response = await fetch(`${this.apiBase}/${characterId}/items/${itemId}`, {
+                method: 'DELETE',
+                headers: { 'Content-Type': 'application/json' },
+                body: JSON.stringify({ quantity })
+            });
+            if (!response.ok) {
+                throw new Error(`Failed to remove item: ${response.status}`);
+            }
+            const result = await response.json();
+            if (result.inventory) {
+                const inventory = this.transformApiData(result.inventory);
+                this.cache.set(characterId, {
+                    data: inventory,
+                    timestamp: Date.now()
+                });
+                this.handleInventoryUpdate({
+                    type: 'item_removed',
+                    itemId,
+                    inventory,
+                    timestamp: Date.now()
+                });
+            }
+            return {
+                success: true,
+                message: `Removed ${quantity} ${itemId}(s) from inventory`,
+                updatedInventory: result.inventory
+            };
+        }
+        catch (error) {
+            console.error('Failed to remove item:', error);
+            return {
+                success: false,
+                message: 'Failed to remove item. Please try again.'
+            };
+        }
+    }
+
+    async useItem(characterId, itemId) {
+        try {
+            const response = await fetch(`${this.apiBase}/${characterId}/items/${itemId}/use`, {
+                method: 'POST',
+                headers: { 'Content-Type': 'application/json' }
+            });
+            if (!response.ok) {
+                throw new Error(`Failed to use item: ${response.status}`);
+            }
+            const result = await response.json();
+            if (result.inventory) {
+                const inventory = this.transformApiData(result.inventory);
+                this.cache.set(characterId, {
+                    data: inventory,
+                    timestamp: Date.now()
+                });
+                this.handleInventoryUpdate({
+                    type: 'item_used',
+                    itemId,
+                    inventory,
+                    timestamp: Date.now()
+                });
+            }
+            return {
+                success: true,
+                message: `Used ${itemId}`,
                 updatedInventory: result.inventory,
                 effects: result.effects
             };
         }
         catch (error) {
-            console.error('Failed to execute action:', error);
+            console.error('Failed to use item:', error);
             return {
                 success: false,
-                message: 'Failed to execute action. Please try again.'
+                message: 'Failed to use item. Please try again.'
             };
+        }
+    }
+
+    // Legacy method for backward compatibility - routes to appropriate new method
+    async executeAction(action) {
+        const characterId = action.characterId || this.currentPlayerId;
+        if (!characterId) {
+            return { success: false, message: 'No character ID specified' };
+        }
+
+        switch (action.type) {
+            case 'add':
+                return this.addItem(characterId, action.itemId, action.quantity || 1);
+            case 'remove':
+                return this.removeItem(characterId, action.itemId, action.quantity || 1);
+            case 'use':
+                return this.useItem(characterId, action.itemId);
+            default:
+                return { success: false, message: 'Unsupported action type' };
         }
     }
     getUpdateType(actionType) {
         switch (actionType) {
-            case 'equip': return 'item_equipped';
+            case 'add': return 'item_added';
+            case 'remove': return 'item_removed';
             case 'use': return 'item_used';
+            case 'equip': return 'item_equipped';
             case 'drop': return 'item_removed';
             case 'store': return 'item_removed';
-            default: return 'weight_changed';
+            default: return 'inventory_updated';
         }
     }
     getActionMessage(action, success) {
@@ -180,6 +322,21 @@ class InventoryManager {
     }
     clearCache() {
         this.cache.clear();
+    }
+
+    disconnectWebSocket() {
+        if (this.wsSubscription) {
+            this.wsSubscription(); // Call unsubscribe function
+            this.wsSubscription = null;
+        }
+        if (this.pollingInterval) {
+            clearInterval(this.pollingInterval);
+            this.pollingInterval = null;
+        }
+    }
+
+    isWebSocketConnected() {
+        return this.wsSubscription !== null;
     }
     async searchItems(query) {
         const inventory = await this.getPlayerInventory();

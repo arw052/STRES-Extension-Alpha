@@ -61,6 +61,10 @@
   settingsHost.id = 'stres-settings-host';
   root.appendChild(settingsHost);
 
+  const combatHost = doc.createElement('div');
+  combatHost.id = 'stres-combat-host';
+  root.appendChild(combatHost);
+
   // Import host removed - using folder-based system
 
   // Import UMD-like shims if present

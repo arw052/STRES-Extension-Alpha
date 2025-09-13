@@ -1,6 +1,4 @@
 "use strict";
-Object.defineProperty(exports, "__esModule", { value: true });
-exports.configManager = exports.ConfigManager = void 0;
 class ConfigManager {
     constructor() {
         this.changeListeners = new Set();
@@ -173,7 +171,7 @@ class ConfigManager {
         return `Inventory UI: ${enabled.join(', ') || 'None enabled'}`;
     }
 }
-exports.ConfigManager = ConfigManager;
+
 ConfigManager.STORAGE_KEY = 'stres-inventory-config';
 ConfigManager.DEFAULT_CONFIG = {
     quickbar: {
@@ -197,10 +195,19 @@ ConfigManager.DEFAULT_CONFIG = {
         showAdvanced: false,
         enableDragDrop: true
     },
+    combat: {
+        enabled: true,
+        apiBase: 'http://localhost:3001',
+        campaignId: 'default-campaign',
+        characterId: '22222222-2222-2222-2222-222222222222',
+        showPanel: true,
+        autoAct: false
+    },
     global: {
         theme: 'auto',
         animations: true,
         soundEffects: false
     }
 };
-exports.configManager = new ConfigManager();
+export { ConfigManager };
+export const configManager = new ConfigManager();
