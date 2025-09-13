@@ -97,19 +97,21 @@ const STRESChat = {
       case 'show':
       case 'list':
         this.showInventory();
-        break;
+        return '';
       case 'add':
         this.addItem(parts.slice(2).join(' '));
-        break;
+        return '';
       case 'remove':
         this.removeItem(parts.slice(2).join(' '));
-        break;
+        return '';
       case 'use':
         this.useItem(parts.slice(2).join(' '));
-        break;
+        return '';
       default:
         this.showHelp();
+        return '';
     }
+    return '';
   },
 
   handleStresCommand(command) {
@@ -120,31 +122,34 @@ const STRESChat = {
       switch(action) {
         case 'status':
           this.showStatus();
-          break;
+          return '';
         case 'join':
           this.rejoinWebSocket();
-          break;
+          return '';
         case 'campaign':
           this.showCampaign();
-          break;
+          return '';
         case 'settings':
-          window.STRES?.toggleSettings?.();
-          break;
+          try { window.STRES?.toggleSettings?.(); } catch {}
+          this.sendToChat('⚙️ Opened STRES settings panel');
+          return '';
         case 'reset':
           this.resetSettings();
-          break;
+          return '';
         case 'debug':
           this.showDebugInfo();
-          break;
+          return '';
         case 'fixport':
           this.fixPortConfiguration();
-          break;
+          return '';
         default:
           this.showHelp();
+          return '';
       }
     } catch (error) {
       console.error('[STRES] Error in handleStresCommand:', error);
       this.sendToChat('❌ Error processing STRES command: ' + error.message);
+      return '';
     }
   },
 
@@ -177,15 +182,22 @@ const STRESChat = {
     `.trim();
 
     this.sendToChat(message);
+    return '';
   },
 
   resetSettings() {
     if (window.extension_settings) {
       window.extension_settings[extensionName] = structuredClone(defaultSettings);
+      // Persist via SillyTavern if available
+      try {
+        const ctx = window.SillyTavern?.getContext?.();
+        (ctx?.saveSettingsDebounced || window.saveSettingsDebounced)?.();
+      } catch {}
       this.sendToChat('✅ STRES settings reset to defaults');
     } else {
       this.sendToChat('❌ Cannot reset settings - extension_settings not available');
     }
+    return '';
   },
 
   showDebugInfo() {
@@ -202,6 +214,7 @@ const STRESChat = {
     `.trim();
 
     this.sendToChat(debugMessage);
+    return '';
   },
 
   fixPortConfiguration() {
@@ -210,11 +223,21 @@ const STRESChat = {
         window.extension_settings[extensionName] = {};
       }
       window.extension_settings[extensionName].serverUrl = "http://localhost:3001";
+      try {
+        // Update live client base if already created
+        if (stresClient && typeof stresClient === 'object') {
+          stresClient.baseUrl = window.extension_settings[extensionName].serverUrl;
+        }
+        const ctx = window.SillyTavern?.getContext?.();
+        (ctx?.saveSettingsDebounced || window.saveSettingsDebounced)?.();
+        try { window.STRES?.refreshSettingsUI?.(); } catch {}
+      } catch {}
       this.sendToChat('✅ STRES API URL fixed to http://localhost:3001');
       this.sendToChat('🔄 Try /stres status again to test the connection');
     } else {
       this.sendToChat('❌ Cannot fix port - extension_settings not available');
     }
+    return '';
   },
 
   showHelp() {
@@ -234,10 +257,12 @@ const STRESChat = {
     `.trim();
 
     this.sendToChat(message);
+    return '';
   },
 
   rejoinWebSocket() {
     this.sendToChat('🔄 WebSocket reconnection requested');
+    return '';
   },
 
   showCampaign() {
@@ -249,6 +274,7 @@ const STRESChat = {
     `.trim();
 
     this.sendToChat(message);
+    return '';
   },
 
   async addItem(argStr) {
@@ -260,6 +286,7 @@ const STRESChat = {
       return;
     }
     this.sendToChat(`✅ Added ${quantity} ${itemId} (simulated)`);
+    return '';
   },
 
   async removeItem(argStr) {
@@ -271,6 +298,7 @@ const STRESChat = {
       return;
     }
     this.sendToChat(`✅ Removed ${quantity} ${itemId} (simulated)`);
+    return '';
   },
 
   async useItem(argStr) {
@@ -280,6 +308,7 @@ const STRESChat = {
       return;
     }
     this.sendToChat(`⚔️ Used ${itemId} (simulated)`);
+    return '';
   },
 
   showInventory() {
@@ -292,6 +321,7 @@ const STRESChat = {
     `.trim();
 
     this.sendToChat(message);
+    return '';
   },
 
   handleCombatCommand(command) {
@@ -301,13 +331,15 @@ const STRESChat = {
     switch(subcommand) {
       case 'act':
         this.handleCombatAct(parts.slice(2));
-        break;
+        return '';
       case 'status':
         this.showCombatStatus();
-        break;
+        return '';
       default:
         this.sendToChat('**Combat Commands:**\n• /combat act attack <targetId> - Submit attack action\n• /combat status - Show current combat state');
+        return '';
     }
+    return '';
   },
 
   handleCombatAct(args) {
@@ -318,10 +350,12 @@ const STRESChat = {
 
     const targetId = args[1];
     this.sendToChat(`⚔️ Combat action: Attack ${targetId} (simulated)`);
+    return '';
   },
 
   showCombatStatus() {
     this.sendToChat('**Combat Status**\n• Active: No\n• Current Turn: None\n*Note: Connect to STRES backend for real combat*');
+    return '';
   },
 
   sendToChat(message) {
@@ -473,6 +507,131 @@ function initializeUI() {
     const hidden = panel.getAttribute('aria-hidden') === 'true';
     panel.setAttribute('aria-hidden', hidden ? 'false' : 'true');
   };
+
+  // Real Settings UI
+  (function renderSettingsPanel() {
+    const settings = (window.extension_settings?.[extensionName]) || structuredClone(defaultSettings);
+
+    const panel = doc.createElement('div');
+    panel.className = 'stres-settings-panel';
+    panel.setAttribute('aria-hidden', 'true');
+
+    // Header
+    const header = doc.createElement('div');
+    header.className = 'stres-settings__header';
+    const title = doc.createElement('strong');
+    title.textContent = 'STRES Settings';
+    const btnClose = doc.createElement('button');
+    btnClose.className = 'stres-btn stres-btn--icon';
+    btnClose.setAttribute('aria-label', 'Close');
+    btnClose.textContent = '✕';
+    btnClose.addEventListener('click', () => panel.setAttribute('aria-hidden', 'true'));
+    header.appendChild(title); header.appendChild(btnClose);
+
+    // Content
+    const content = doc.createElement('div');
+    content.className = 'stres-settings__content';
+
+    const secConn = doc.createElement('div');
+    secConn.className = 'stres-settings__section';
+    const hConn = doc.createElement('h3'); hConn.textContent = 'Connection';
+    const fldApi = doc.createElement('div'); fldApi.className = 'stres-field';
+    const lblApi = doc.createElement('label'); lblApi.setAttribute('for','stres-api-url'); lblApi.textContent = 'API Base URL';
+    const inpApi = doc.createElement('input'); inpApi.type = 'text'; inpApi.id = 'stres-api-url'; inpApi.placeholder = 'http://localhost:3001'; inpApi.value = settings.serverUrl || defaultSettings.serverUrl;
+    fldApi.appendChild(lblApi); fldApi.appendChild(inpApi);
+
+    const fldCampaign = doc.createElement('div'); fldCampaign.className = 'stres-field';
+    const lblCamp = doc.createElement('label'); lblCamp.setAttribute('for','stres-campaign-id'); lblCamp.textContent = 'Campaign ID';
+    const inpCamp = doc.createElement('input'); inpCamp.type = 'text'; inpCamp.id = 'stres-campaign-id'; inpCamp.placeholder = 'default-campaign'; inpCamp.value = settings.campaignId || '';
+    fldCampaign.appendChild(lblCamp); fldCampaign.appendChild(inpCamp);
+
+    const fldChar = doc.createElement('div'); fldChar.className = 'stres-field';
+    const lblChar = doc.createElement('label'); lblChar.setAttribute('for','stres-character-id'); lblChar.textContent = 'Character ID';
+    const inpChar = doc.createElement('input'); inpChar.type = 'text'; inpChar.id = 'stres-character-id'; inpChar.placeholder = '0000-...'; inpChar.value = settings.characterId || '';
+    fldChar.appendChild(lblChar); fldChar.appendChild(inpChar);
+
+    secConn.appendChild(hConn); secConn.appendChild(fldApi); secConn.appendChild(fldCampaign); secConn.appendChild(fldChar);
+    content.appendChild(secConn);
+
+    // Footer
+    const footer = doc.createElement('div'); footer.className = 'stres-settings__footer';
+    const notice = doc.createElement('div'); notice.className = 'stres-notice'; notice.id = 'stres-settings-notice'; notice.dataset.visible = 'false'; notice.textContent = '';
+
+    const btnTest = doc.createElement('button'); btnTest.className = 'stres-btn stres-btn--ghost'; btnTest.textContent = 'Test Connection';
+    const btnReset = doc.createElement('button'); btnReset.className = 'stres-btn stres-btn--danger'; btnReset.textContent = 'Reset';
+    const btnSave = doc.createElement('button'); btnSave.className = 'stres-btn'; btnSave.textContent = 'Save';
+
+    // Wire handlers
+    async function testConnection(url) {
+      let ok = false, msg = '';
+      try {
+        const u = (url || '').replace(/\/$/, '') || 'http://localhost:3001';
+        const res = await fetch(u + '/health', { method: 'GET' });
+        if (res.ok) {
+          const j = await res.json().catch(()=>({}));
+          ok = true; msg = `Healthy (${j.version || 'unknown'})`;
+        } else {
+          msg = `HTTP ${res.status}`;
+        }
+      } catch (e) {
+        msg = String(e?.message || e);
+      }
+      notice.textContent = ok ? `✅ ${msg}` : `❌ ${msg}`;
+      notice.dataset.visible = 'true';
+      setTimeout(()=>{ notice.dataset.visible = 'false'; }, 3500);
+      return ok;
+    }
+
+    btnTest.addEventListener('click', () => {
+      testConnection(inpApi.value);
+    });
+
+    btnReset.addEventListener('click', () => {
+      inpApi.value = defaultSettings.serverUrl;
+      inpCamp.value = '';
+      inpChar.value = '';
+      notice.textContent = 'Defaults restored (not saved)';
+      notice.dataset.visible = 'true'; setTimeout(()=>{ notice.dataset.visible = 'false'; }, 2500);
+    });
+
+    btnSave.addEventListener('click', async () => {
+      const url = inpApi.value.trim().replace(/\/$/, '');
+      const s = window.extension_settings || (window.SillyTavern?.getContext?.().extensionSettings);
+      s[extensionName] = s[extensionName] || {};
+      s[extensionName].serverUrl = url || defaultSettings.serverUrl;
+      s[extensionName].campaignId = inpCamp.value.trim() || null;
+      s[extensionName].characterId = inpChar.value.trim() || null;
+      try {
+        const ctx = window.SillyTavern?.getContext?.();
+        (ctx?.saveSettingsDebounced || window.saveSettingsDebounced)?.();
+      } catch {}
+      try { if (stresClient) stresClient.baseUrl = s[extensionName].serverUrl; } catch {}
+      notice.textContent = 'Settings saved';
+      notice.dataset.visible = 'true'; setTimeout(()=>{ notice.dataset.visible = 'false'; }, 2000);
+      // Optional: quick probe
+      setTimeout(()=>{ testConnection(url); }, 100);
+    });
+
+    footer.appendChild(btnTest);
+    footer.appendChild(btnReset);
+    footer.appendChild(btnSave);
+
+    panel.appendChild(header);
+    panel.appendChild(content);
+    panel.appendChild(footer);
+    settingsHost.appendChild(panel);
+
+    // Notice placement under footer
+    settingsHost.appendChild(notice);
+
+    // Public helpers to sync UI with settings
+    window.STRES.refreshSettingsUI = () => {
+      const cur = (window.extension_settings?.[extensionName]) || {};
+      inpApi.value = cur.serverUrl || defaultSettings.serverUrl;
+      inpCamp.value = cur.campaignId || '';
+      inpChar.value = cur.characterId || '';
+    };
+  })();
 
   console.log("[STRES] UI components initialized");
 }
