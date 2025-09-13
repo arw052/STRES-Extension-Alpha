@@ -113,33 +113,38 @@ const STRESChat = {
   },
 
   handleStresCommand(command) {
-    const parts = command.split(' ');
-    const action = parts[1];
+    try {
+      const parts = command.split(' ');
+      const action = parts && parts.length > 1 ? parts[1] : '';
 
-    switch(action) {
-      case 'status':
-        this.showStatus();
-        break;
-      case 'join':
-        this.rejoinWebSocket();
-        break;
-      case 'campaign':
-        this.showCampaign();
-        break;
-      case 'settings':
-        window.STRES?.toggleSettings?.();
-        break;
-      case 'reset':
-        this.resetSettings();
-        break;
-      case 'debug':
-        this.showDebugInfo();
-        break;
-      case 'fixport':
-        this.fixPortConfiguration();
-        break;
-      default:
-        this.showHelp();
+      switch(action) {
+        case 'status':
+          this.showStatus();
+          break;
+        case 'join':
+          this.rejoinWebSocket();
+          break;
+        case 'campaign':
+          this.showCampaign();
+          break;
+        case 'settings':
+          window.STRES?.toggleSettings?.();
+          break;
+        case 'reset':
+          this.resetSettings();
+          break;
+        case 'debug':
+          this.showDebugInfo();
+          break;
+        case 'fixport':
+          this.fixPortConfiguration();
+          break;
+        default:
+          this.showHelp();
+      }
+    } catch (error) {
+      console.error('[STRES] Error in handleStresCommand:', error);
+      this.sendToChat('❌ Error processing STRES command: ' + error.message);
     }
   },
 
@@ -385,7 +390,10 @@ function registerSlashCommands(context) {
     // Register all STRES commands
     SlashCommandParser.addCommandObject(SlashCommand.fromProps({
       name: 'stres',
-      callback: (args) => STRESChat.handleStresCommand('/stres ' + args.join(' ')),
+      callback: (args) => {
+        const argString = args && args.length > 0 ? args.join(' ') : '';
+        return STRESChat.handleStresCommand('/stres ' + argString);
+      },
       helpString: 'STRES main commands - status, join, campaign, settings, reset, debug, fixport'
     }));
 
@@ -411,10 +419,19 @@ function registerSlashCommands(context) {
   } else if (typeof registerSlashCommand === 'function') {
     console.log("[STRES] Using legacy registerSlashCommand function");
 
-    registerSlashCommand('stres', (args) => STRESChat.handleStresCommand('/stres ' + args.join(' ')), [], 'STRES main commands - status, join, campaign, settings, reset, debug, fixport', true, true);
+    registerSlashCommand('stres', (args) => {
+      const argString = args && args.length > 0 ? args.join(' ') : '';
+      return STRESChat.handleStresCommand('/stres ' + argString);
+    }, [], 'STRES main commands - status, join, campaign, settings, reset, debug, fixport', true, true);
     registerSlashCommand('stres_status', () => STRESChat.showStatus(), [], 'Show STRES status', true, true);
-    registerSlashCommand('inventory', (args) => STRESChat.handleInventoryCommand('/inventory ' + args.join(' ')), [], 'Inventory management', true, true);
-    registerSlashCommand('combat', (args) => STRESChat.handleCombatCommand('/combat ' + args.join(' ')), [], 'Combat commands', true, true);
+    registerSlashCommand('inventory', (args) => {
+      const argString = args && args.length > 0 ? args.join(' ') : '';
+      return STRESChat.handleInventoryCommand('/inventory ' + argString);
+    }, [], 'Inventory management', true, true);
+    registerSlashCommand('combat', (args) => {
+      const argString = args && args.length > 0 ? args.join(' ') : '';
+      return STRESChat.handleCombatCommand('/combat ' + argString);
+    }, [], 'Combat commands', true, true);
 
     console.log("[STRES] Slash commands registered successfully using registerSlashCommand");
   } else {
