@@ -76,6 +76,7 @@ const defaultSettings = {
     enabled: true,
     showBadge: true,
     pollMs: 300000, // 5 min
+    mode: 'poll', // 'poll' | 'on_turn'
     lastBadge: null
   },
   telemetry: {
@@ -1213,6 +1214,7 @@ const STRESGuard = {
 const STRESCost = {
   ctx: null,
   timer: null,
+  hasBalanceAPI: undefined,
   getSettings() { const s = window.extension_settings?.[extensionName] || {}; return s.cost || defaultSettings.cost; },
   init(ctx) {
     try {
@@ -1220,7 +1222,8 @@ const STRESCost = {
       const es = this.ctx?.eventSource; const ET = this.ctx?.eventTypes || {};
       if (es && ET) {
         es.on(ET.CHAT_CHANGED, ()=> this.refreshBadge().catch(()=>{}));
-        es.on(ET.MESSAGE_SENT, ()=> this.maybeSchedule());
+        es.on(ET.MESSAGE_SENT, ()=> this.onTurnEvent());
+        es.on(ET.GENERATION_STARTED, ()=> this.onTurnEvent());
       }
       this.maybeSchedule();
       // Initial attempt
@@ -1235,8 +1238,53 @@ const STRESCost = {
       const cfg = this.getSettings();
       if (!cfg.enabled) return;
       clearInterval(this.timer);
-      this.timer = setInterval(()=>{ this.refreshBadge().catch(()=>{}); }, Math.max(60000, Number(cfg.pollMs || 300000)));
+      if (String(cfg.mode||'poll') === 'poll') {
+        this.timer = setInterval(()=>{ this.refreshBadge().catch(()=>{}); }, Math.max(60000, Number(cfg.pollMs || 300000)));
+      } else {
+        this.timer = null;
+      }
     } catch {}
+  },
+  onTurnEvent() {
+    try {
+      const cfg = this.getSettings();
+      if (!cfg.enabled) return;
+      if (String(cfg.mode||'poll') === 'on_turn') {
+        this.refreshBadge().catch(()=>{});
+      } else {
+        // Ensure timer exists for poll mode
+        this.maybeSchedule();
+      }
+    } catch {}
+  },
+  async detectBalanceAPI(base) {
+    // Cache presence of /api/openrouter/balance to avoid noisy 404s
+    try {
+      const s = window.extension_settings || (this.ctx?.extensionSettings) || {};
+      s[extensionName] = s[extensionName] || {};
+      s[extensionName].cost = s[extensionName].cost || structuredClone(defaultSettings.cost);
+      if (typeof s[extensionName].cost.hasBalanceAPI === 'boolean') {
+        this.hasBalanceAPI = s[extensionName].cost.hasBalanceAPI;
+        return this.hasBalanceAPI;
+      }
+      const r = await fetch(base + '/api/openrouter/balance');
+      const ok = r.ok;
+      s[extensionName].cost.hasBalanceAPI = ok;
+      this.hasBalanceAPI = ok;
+      try { const c=this.ctx; (c?.saveSettingsDebounced || window.saveSettingsDebounced)?.(); } catch {}
+      return ok;
+    } catch {
+      // Network or CORS issues: treat as absent
+      try {
+        const s = window.extension_settings || (this.ctx?.extensionSettings) || {};
+        s[extensionName] = s[extensionName] || {};
+        s[extensionName].cost = s[extensionName].cost || structuredClone(defaultSettings.cost);
+        s[extensionName].cost.hasBalanceAPI = false;
+        this.hasBalanceAPI = false;
+        try { const c=this.ctx; (c?.saveSettingsDebounced || window.saveSettingsDebounced)?.(); } catch {}
+      } catch {}
+      return false;
+    }
   },
   async refreshBadge() {
     try {
@@ -1247,10 +1295,24 @@ const STRESCost = {
       s[extensionName].cost = s[extensionName].cost || structuredClone(defaultSettings.cost);
       // Try backend balance
       let balance = null;
+      const base = (s[extensionName].serverUrl || defaultSettings.serverUrl).replace(/\/$/, '');
       try {
-        const base = (s[extensionName].serverUrl || defaultSettings.serverUrl).replace(/\/$/, '');
-        const r = await fetch(base + '/api/openrouter/balance');
-        if (r.ok) { const j = await r.json(); balance = Number(j?.credits_remaining ?? j?.balance ?? j?.credits) || null; }
+        // Only probe once; then cache result and skip network if 404 was seen
+        if (typeof this.hasBalanceAPI !== 'boolean') {
+          await this.detectBalanceAPI(base);
+        }
+        if (this.hasBalanceAPI) {
+          const r = await fetch(base + '/api/openrouter/balance');
+          if (r.ok) { const j = await r.json(); balance = Number(j?.credits_remaining ?? j?.balance ?? j?.credits) || null; }
+          else if (r.status === 404) { this.hasBalanceAPI = false; s[extensionName].cost.hasBalanceAPI = false; try { const c=this.ctx; (c?.saveSettingsDebounced || window.saveSettingsDebounced)?.(); } catch {} }
+        }
+        // Fallback: optional status endpoint
+        if (balance == null && this.hasBalanceAPI === false) {
+          try {
+            const rs = await fetch(base + '/api/status/ai');
+            if (rs.ok) { const j = await rs.json(); const val = Number(j?.credits); if (Number.isFinite(val)) balance = val; }
+          } catch {}
+        }
       } catch {}
       // Try UI estimate of max prompt cost
       let est = '';
@@ -1772,7 +1834,8 @@ const STRESChat = {
               const cs = s.cost || defaultSettings.cost;
               const last = cs.lastBadge?.text || '(none)';
               const src = (window.SillyTavern?.getContext?.().chatCompletionSettings?.chat_completion_source)||'(unknown)';
-              this.sendToChat(`**Cost**\n• Enabled: ${!!cs.enabled}\n• Show Badge: ${!!cs.showBadge}\n• Source: ${src}\n• Last Badge: ${last}`);
+              const mode = cs.mode || 'poll';
+              this.sendToChat(`**Cost**\n• Enabled: ${!!cs.enabled}\n• Show Badge: ${!!cs.showBadge}\n• Mode: ${mode}\n• Source: ${src}\n• Last Badge: ${last}`);
             } catch { this.sendToChat('**Cost**\n• Status unavailable'); }
             return '';
           }
@@ -1798,11 +1861,23 @@ const STRESChat = {
             this.sendToChat(`✅ Badge ${v}`);
             return '';
           }
+          if (sub === 'mode') {
+            const v = (parts[3]||'').toLowerCase();
+            if (!v || !['poll','on_turn'].includes(v)) { this.sendToChat('Usage: /stres cost mode <poll|on_turn>'); return ''; }
+            const s = window.extension_settings || (window.SillyTavern?.getContext?.().extensionSettings);
+            s[extensionName] = s[extensionName] || {};
+            s[extensionName].cost = s[extensionName].cost || structuredClone(defaultSettings.cost);
+            s[extensionName].cost.mode = v;
+            try { const ctx = window.SillyTavern?.getContext?.(); (ctx?.saveSettingsDebounced || window.saveSettingsDebounced)?.(); } catch {}
+            STRESCost.maybeSchedule();
+            this.sendToChat(`✅ Cost mode set to ${v}`);
+            return '';
+          }
           if (sub === 'now') {
             (async()=>{ const ok = await STRESCost.refreshBadge(); this.sendToChat(ok? '✅ Refreshed cost badge' : '❌ No cost info or unsupported source'); })();
             return '';
           }
-          this.sendToChat('Usage: /stres cost [status|on|off|badge on|off|now]');
+          this.sendToChat('Usage: /stres cost [status|on|off|badge on|off|mode <poll|on_turn>|now]');
           return '';
         }
         case 'tools': {
@@ -2901,12 +2976,20 @@ function initializeUI() {
 
   // Expose a minimal API to toggle settings (prefers tabbed panel)
   window.STRES = window.STRES || {};
+  const setSettingsVisibility = (panel, show) => {
+    try {
+      panel.setAttribute('aria-hidden', show ? 'false' : 'true');
+      // Tabbed panel uses flex; hide/show consistently for both variants
+      const displayMode = panel.classList.contains('stres-settings-panel--tabs') ? 'flex' : 'block';
+      panel.style.display = show ? displayMode : 'none';
+    } catch {}
+  };
   window.STRES.toggleSettings = () => {
     const tabs = doc.querySelector('#stres-settings-tabs-panel');
     const panel = tabs || doc.querySelector('#stres-settings-host .stres-settings-panel');
     if (!panel) return;
     const hidden = panel.getAttribute('aria-hidden') === 'true';
-    panel.setAttribute('aria-hidden', hidden ? 'false' : 'true');
+    setSettingsVisibility(panel, hidden);
   };
 
   // Real Settings UI
@@ -2916,6 +2999,7 @@ function initializeUI() {
     const panel = doc.createElement('div');
     panel.className = 'stres-settings-panel';
     panel.setAttribute('aria-hidden', 'true');
+    panel.style.display = 'none';
 
     // Header
     const header = doc.createElement('div');
@@ -2926,7 +3010,7 @@ function initializeUI() {
     btnClose.className = 'stres-btn stres-btn--icon';
     btnClose.setAttribute('aria-label', 'Close');
     btnClose.textContent = '✕';
-    btnClose.addEventListener('click', () => panel.setAttribute('aria-hidden', 'true'));
+    btnClose.addEventListener('click', () => setSettingsVisibility(panel, false));
     header.appendChild(title); header.appendChild(btnClose);
 
     // Content
@@ -3181,6 +3265,7 @@ function initializeUI() {
     panel.id = 'stres-settings-tabs-panel';
     panel.className = 'stres-settings-panel stres-settings-panel--tabs';
     panel.setAttribute('aria-hidden', 'true');
+    panel.style.display = 'none';
     panel.style.maxWidth = '780px';
     panel.style.background = 'var(--stres-surface)';
     panel.style.border = '1px solid var(--stres-border)';
@@ -3201,7 +3286,7 @@ function initializeUI() {
     const actions = doc.createElement('div'); actions.style.display='flex'; actions.style.gap='6px';
     const btnPop = doc.createElement('button'); btnPop.className='stres-btn'; btnPop.textContent='Pop out'; btnPop.title='Pop out';
     const btnClose = doc.createElement('button'); btnClose.className='stres-btn stres-btn--icon'; btnClose.textContent='✕'; btnClose.title='Close';
-    btnClose.addEventListener('click', ()=> panel.setAttribute('aria-hidden','true'));
+    btnClose.addEventListener('click', ()=> setSettingsVisibility(panel, false));
     let popped = false;
     btnPop.addEventListener('click', ()=>{
       popped = !popped;
@@ -3396,11 +3481,13 @@ function initializeUI() {
       const guardT = mkInput('text', get(s,'guard.template', defaultSettings.guard.template)); guardT.style.width='100%'; guardT.addEventListener('change', onChange('guard.template', String, ()=>STRESGuard.refreshGuardrailInPrompt()));
       const costOn = mkCheck(get(s,'cost.enabled',true)); costOn.addEventListener('change', (e)=>{ set(window.extension_settings[extensionName],'cost.enabled',e.target.checked); save(); STRESCost.refreshBadge(); });
       const costBadge = mkCheck(get(s,'cost.showBadge',true)); costBadge.addEventListener('change', (e)=>{ set(window.extension_settings[extensionName],'cost.showBadge',e.target.checked); save(); STRESPrompts.refreshSceneHeaderInPrompt(); });
+      const costMode = (()=>{ const sel = mkSelect(['poll','on_turn'], get(s,'cost.mode','poll')); sel.addEventListener('change', (e)=>{ set(window.extension_settings[extensionName],'cost.mode', e.target.value); save(); STRESCost.maybeSchedule(); }); return sel; })();
       body.append(
         row('Crosstalk Guard', guardOn),
         row('Guard Template', guardT),
         row('Cost Awareness', costOn, 'Enable OpenRouter cost/balance awareness'),
-        row('Show Cost in Header', costBadge)
+        row('Show Cost in Header', costBadge),
+        row('Cost Update Mode', costMode, 'poll = background; on_turn = after you send a message')
       );
     };
 
