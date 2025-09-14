@@ -6,7 +6,9 @@ const extensionName = "stres";
 const defaultSettings = {
   serverUrl: "http://localhost:3001",
   campaignId: null,
+  worldpackId: null,
   chatCampaigns: {},
+  autoBindCampaignToChat: true,
   autoInjection: {
     enabled: true,
     mode: "basic",
@@ -62,6 +64,23 @@ class STRESClient {
     } catch (error) {
       return { status: 'unreachable', error: error.message };
     }
+  }
+
+  async getCurrentWorldpack() {
+    try {
+      return await this.request('/worldpack/current');
+    } catch (error) {
+      return { success: false, error: error.message };
+    }
+  }
+
+  async loadWorldpackById(packId) {
+    const qp = encodeURIComponent(packId || '');
+    const url = `${this.baseUrl}${this.apiPrefix}/worldpack/load?packId=${qp}`;
+    const res = await fetch(url, { method: 'POST', headers: { 'Content-Type': 'application/json' } });
+    const j = await res.json().catch(()=>({}));
+    if (!res.ok) throw new Error(j?.error?.message || `HTTP ${res.status}`);
+    return j;
   }
 }
 
@@ -123,6 +142,50 @@ const STRESChat = {
         case 'status':
           this.showStatus();
           return '';
+        case 'bindchat': {
+          try {
+            const ctx = window.SillyTavern?.getContext?.() || {};
+            const chatMeta = ctx.chatMetadata || {};
+            const cid = ctx.chatId || chatMeta.chat_id;
+            if (!cid) { this.sendToChat('❌ No active chat to bind'); return ''; }
+            const s = window.extension_settings || (ctx.extensionSettings);
+            s[extensionName] = s[extensionName] || {};
+            const camp = s[extensionName].campaignId || `chat-${cid}`;
+            s[extensionName].campaignId = camp;
+            s[extensionName].chatCampaigns = s[extensionName].chatCampaigns || {};
+            s[extensionName].chatCampaigns[cid] = camp;
+            try { (ctx?.saveSettingsDebounced || window.saveSettingsDebounced)?.(); } catch {}
+            this.sendToChat(`✅ Bound chat ${cid} → campaign ${camp}`);
+          } catch (e) { this.sendToChat('❌ Failed to bind chat: ' + (e?.message||e)); }
+          return '';
+        }
+        case 'showchat': {
+          try {
+            const ctx = window.SillyTavern?.getContext?.() || {};
+            const chatMeta = ctx.chatMetadata || {};
+            const cid = ctx.chatId || chatMeta.chat_id || 'unknown';
+            const cname = ctx.chatName || chatMeta.chat_name || 'unknown';
+            const s = window.extension_settings?.[extensionName] || {};
+            const mapped = (s.chatCampaigns||{})[cid];
+            this.sendToChat(`**Chat**\n• Name: ${cname}\n• ID: ${cid}\n• Bound Campaign: ${mapped || '(none)'}\n• Current Campaign: ${s.campaignId || '(none)'} `);
+          } catch (e) { this.sendToChat('❌ Failed to get chat info: ' + (e?.message||e)); }
+          return '';
+        }
+        case 'worldpack': {
+          const sub = (parts[2]||'').toLowerCase();
+          if (!sub || sub === 'status') {
+            this.showWorldpack();
+            return '';
+          }
+          if (sub === 'load') {
+            const id = (parts[3]||'').trim();
+            if (!id) { this.sendToChat('Usage: /stres worldpack load <packId>'); return ''; }
+            this.loadWorldpack(id);
+            return '';
+          }
+          this.sendToChat('Usage: /stres worldpack [status|load <packId>]');
+          return '';
+        }
         case 'join':
           this.rejoinWebSocket();
           return '';
@@ -156,11 +219,16 @@ const STRESChat = {
           if (key === 'campaign') {
             s[extensionName].campaignId = value || null;
             this.sendToChat(`✅ Campaign ID set to ${s[extensionName].campaignId || 'None'}`);
+          } else if (key === 'worldpack') {
+            s[extensionName].worldpackId = value || null;
+            try { const ctx = window.SillyTavern?.getContext?.(); (ctx?.saveSettingsDebounced || window.saveSettingsDebounced)?.(); } catch {}
+            try { window.STRES?.refreshSettingsUI?.(); } catch {}
+            this.sendToChat(`✅ Worldpack ID set to ${s[extensionName].worldpackId || 'None'}`);
           } else if (key === 'char' || key === 'character') {
             s[extensionName].characterId = value || null;
             this.sendToChat(`✅ Character ID set to ${s[extensionName].characterId || 'None'}`);
           } else {
-            this.sendToChat('Usage: /stres set campaign <id> | /stres set character <id>');
+            this.sendToChat('Usage: /stres set campaign <id> | /stres set worldpack <id> | /stres set character <id>');
             return '';
           }
           try { const ctx = window.SillyTavern?.getContext?.(); (ctx?.saveSettingsDebounced || window.saveSettingsDebounced)?.(); } catch {}
@@ -191,6 +259,7 @@ const STRESChat = {
     const settings = window.extension_settings?.[extensionName] || {};
     const apiBase = settings.serverUrl || defaultSettings.serverUrl;
     let apiStatus = 'checking...';
+    let wpStatus = 'checking...';
 
     try {
       const health = await fetch(`${apiBase}/health`);
@@ -204,6 +273,17 @@ const STRESChat = {
       apiStatus = `unreachable (${error.message})`;
     }
 
+    try {
+      const cur = await stresClient.getCurrentWorldpack();
+      if (cur && cur.success) {
+        wpStatus = `${cur.id}@${cur.version}`;
+      } else {
+        wpStatus = 'none';
+      }
+    } catch {
+      wpStatus = 'error';
+    }
+
     const message = `
 **STRES Status**
 • Version: 0.1.2
@@ -211,11 +291,42 @@ const STRESChat = {
 • Default API: ${defaultSettings.serverUrl}
 • Settings API: ${settings.serverUrl || 'not set'}
 • Campaign ID: ${settings.campaignId || 'None'}
+• Worldpack ID: ${settings.worldpackId || 'None'}
+• Active Worldpack: ${wpStatus}
 • Character ID: ${settings.characterId || 'None'}
 • Extension: Loaded ✅
     `.trim();
 
     this.sendToChat(message);
+    return '';
+  },
+
+  async showWorldpack() {
+    try {
+      const cur = await stresClient.getCurrentWorldpack();
+      if (cur && cur.success) {
+        this.sendToChat(`**Worldpack**\n• Active: ${cur.id}@${cur.version}\n• Loaded At: ${cur.loadedAt || 'unknown'}`);
+      } else {
+        this.sendToChat('**Worldpack**\n• Active: None');
+      }
+    } catch (e) {
+      this.sendToChat(`**Worldpack**\n• Error: ${e?.message || e}`);
+    }
+    return '';
+  },
+
+  async loadWorldpack(id) {
+    try {
+      const res = await stresClient.loadWorldpackById(id);
+      const s = window.extension_settings || (window.SillyTavern?.getContext?.().extensionSettings);
+      s[extensionName] = s[extensionName] || {};
+      s[extensionName].worldpackId = id;
+      try { const ctx = window.SillyTavern?.getContext?.(); (ctx?.saveSettingsDebounced || window.saveSettingsDebounced)?.(); } catch {}
+      try { window.STRES?.refreshSettingsUI?.(); } catch {}
+      this.sendToChat(`✅ Loaded worldpack ${res.id}@${res.version}`);
+    } catch (e) {
+      this.sendToChat(`❌ Failed to load worldpack: ${e?.message || e}`);
+    }
     return '';
   },
 
@@ -282,11 +393,16 @@ const STRESChat = {
 • /inventory remove [item] - Remove item
 • /inventory use [item] - Use item
 • /stres status - Show STRES status
+• /stres worldpack - Show active worldpack
+• /stres worldpack load <id> - Load worldpack by ID
 • /stres join - Reconnect WebSocket
 • /stres campaign - Show campaign info
+• /stres showchat - Show current chat and bound campaign
+• /stres bindchat - Bind current chat → current campaign
 • /stres settings - Toggle settings panel
 • /stres setapi <url> - Set API base URL
 • /stres set campaign <id> - Set campaign ID
+• /stres set worldpack <id> - Set worldpack ID
 • /stres set character <id> - Set character ID
 • /stres reset - Reset settings to defaults
 • /stres debug - Show debug information
@@ -440,6 +556,36 @@ async function initializeExtension() {
   // Make settings globally accessible
   window.extension_settings = extensionSettings;
 
+  // Auto-bind campaign to current chat, if possible
+  try {
+    const s = window.extension_settings[extensionName];
+    if (s.autoBindCampaignToChat) {
+      const chatMetadata = context.chatMetadata || {};
+      const currentChatId = context.chatId || chatMetadata.chat_id;
+      if (currentChatId) {
+        s.chatCampaigns = s.chatCampaigns || {};
+        if (s.chatCampaigns[currentChatId]) {
+          s.campaignId = s.chatCampaigns[currentChatId];
+        } else if (!s.campaignId) {
+          // Derive a campaign ID from chat id
+          s.campaignId = `chat-${currentChatId}`;
+          s.chatCampaigns[currentChatId] = s.campaignId;
+        } else {
+          s.chatCampaigns[currentChatId] = s.campaignId;
+        }
+        try { (context?.saveSettingsDebounced || window.saveSettingsDebounced)?.(); } catch {}
+      }
+    }
+  } catch {}
+
+  // If a worldpack is configured, try to ensure it is loaded
+  try {
+    const s = window.extension_settings[extensionName];
+    if (s.worldpackId) {
+      stresClient.loadWorldpackById(s.worldpackId).catch(()=>{});
+    }
+  } catch {}
+
   // Register slash commands
   registerSlashCommands(context);
 
@@ -582,12 +728,17 @@ function initializeUI() {
     const inpCamp = doc.createElement('input'); inpCamp.type = 'text'; inpCamp.id = 'stres-campaign-id'; inpCamp.placeholder = 'default-campaign'; inpCamp.value = settings.campaignId || '';
     fldCampaign.appendChild(lblCamp); fldCampaign.appendChild(inpCamp);
 
+    const fldWp = doc.createElement('div'); fldWp.className = 'stres-field';
+    const lblWp = doc.createElement('label'); lblWp.setAttribute('for','stres-worldpack-id'); lblWp.textContent = 'Worldpack ID';
+    const inpWp = doc.createElement('input'); inpWp.type = 'text'; inpWp.id = 'stres-worldpack-id'; inpWp.placeholder = 'euterra-test-0.35.2'; inpWp.value = settings.worldpackId || '';
+    fldWp.appendChild(lblWp); fldWp.appendChild(inpWp);
+
     const fldChar = doc.createElement('div'); fldChar.className = 'stres-field';
     const lblChar = doc.createElement('label'); lblChar.setAttribute('for','stres-character-id'); lblChar.textContent = 'Character ID';
     const inpChar = doc.createElement('input'); inpChar.type = 'text'; inpChar.id = 'stres-character-id'; inpChar.placeholder = '0000-...'; inpChar.value = settings.characterId || '';
     fldChar.appendChild(lblChar); fldChar.appendChild(inpChar);
 
-    secConn.appendChild(hConn); secConn.appendChild(fldApi); secConn.appendChild(fldCampaign); secConn.appendChild(fldChar);
+    secConn.appendChild(hConn); secConn.appendChild(fldApi); secConn.appendChild(fldCampaign); secConn.appendChild(fldWp); secConn.appendChild(fldChar);
     content.appendChild(secConn);
 
     // Footer
@@ -596,6 +747,7 @@ function initializeUI() {
 
     const btnTest = doc.createElement('button'); btnTest.className = 'stres-btn stres-btn--ghost'; btnTest.textContent = 'Test Connection';
     const btnReset = doc.createElement('button'); btnReset.className = 'stres-btn stres-btn--danger'; btnReset.textContent = 'Reset';
+    const btnLoadWp = doc.createElement('button'); btnLoadWp.className = 'stres-btn stres-btn--ghost'; btnLoadWp.textContent = 'Load Worldpack';
     const btnSave = doc.createElement('button'); btnSave.className = 'stres-btn'; btnSave.textContent = 'Save';
 
     // Wire handlers
@@ -623,6 +775,16 @@ function initializeUI() {
       testConnection(inpApi.value);
     });
 
+    btnLoadWp.addEventListener('click', async () => {
+      const id = (inpWp.value || '').trim();
+      if (!id) { notice.textContent = 'Enter a Worldpack ID first'; notice.dataset.visible = 'true'; setTimeout(()=>{ notice.dataset.visible = 'false'; }, 2000); return; }
+      try {
+        const res = await stresClient.loadWorldpackById(id);
+        notice.textContent = `Loaded ${res.id}@${res.version}`;
+      } catch (e) { notice.textContent = `Error: ${e?.message || e}`; }
+      notice.dataset.visible = 'true'; setTimeout(()=>{ notice.dataset.visible = 'false'; }, 2500);
+    });
+
     btnReset.addEventListener('click', () => {
       inpApi.value = defaultSettings.serverUrl;
       inpCamp.value = '';
@@ -637,6 +799,7 @@ function initializeUI() {
       s[extensionName] = s[extensionName] || {};
       s[extensionName].serverUrl = url || defaultSettings.serverUrl;
       s[extensionName].campaignId = inpCamp.value.trim() || null;
+      s[extensionName].worldpackId = inpWp.value.trim() || null;
       s[extensionName].characterId = inpChar.value.trim() || null;
       try {
         const ctx = window.SillyTavern?.getContext?.();
@@ -650,6 +813,7 @@ function initializeUI() {
     });
 
     footer.appendChild(btnTest);
+    footer.appendChild(btnLoadWp);
     footer.appendChild(btnReset);
     footer.appendChild(btnSave);
 
@@ -768,6 +932,7 @@ function integrateWithExtensionsManager() {
     };
     const api = doc.createElement('input'); api.type = 'text'; api.id = 'stres-em-api-url'; api.placeholder = 'http://localhost:3001'; api.style.width='100%';
     const camp = doc.createElement('input'); camp.type = 'text'; camp.id = 'stres-em-campaign-id'; camp.placeholder = 'default-campaign'; camp.style.width='100%';
+    const wp = doc.createElement('input'); wp.type = 'text'; wp.id = 'stres-em-worldpack-id'; wp.placeholder = 'euterra-test-0.35.2'; wp.style.width='100%';
     const chr = doc.createElement('input'); chr.type = 'text'; chr.id = 'stres-em-character-id'; chr.placeholder = '0000-...'; chr.style.width='100%';
 
     // Buttons
@@ -775,13 +940,15 @@ function integrateWithExtensionsManager() {
     const btnTest = doc.createElement('button'); btnTest.className='menu_button'; btnTest.textContent='Test Connection';
     const btnSave = doc.createElement('button'); btnSave.className='menu_button'; btnSave.textContent='Save';
     const btnReset = doc.createElement('button'); btnReset.className='menu_button'; btnReset.textContent='Reset';
-    actions.append(btnTest, btnReset, btnSave);
+    const btnLoadWp2 = doc.createElement('button'); btnLoadWp2.className='menu_button'; btnLoadWp2.textContent='Load Worldpack';
+    actions.append(btnTest, btnLoadWp2, btnReset, btnSave);
 
     const note = doc.createElement('div'); note.id='stres-em-note'; note.style.fontSize='12px'; note.style.opacity='0.8'; note.style.marginTop='6px';
 
     content.append(
       fld('API Base URL', api),
       fld('Campaign ID', camp),
+      fld('Worldpack ID', wp),
       fld('Character ID', chr),
       actions,
       note
@@ -803,6 +970,7 @@ function integrateWithExtensionsManager() {
       const s = (window.extension_settings?.[extensionName]) || {};
       api.value = s.serverUrl || defaultSettings.serverUrl;
       camp.value = s.campaignId || '';
+      wp.value = s.worldpackId || '';
       chr.value = s.characterId || '';
     }
     refresh();
@@ -814,6 +982,7 @@ function integrateWithExtensionsManager() {
       s[extensionName] = s[extensionName] || {};
       s[extensionName].serverUrl = (api.value || '').trim().replace(/\/$/, '') || defaultSettings.serverUrl;
       s[extensionName].campaignId = (camp.value || '').trim() || null;
+      s[extensionName].worldpackId = (wp.value || '').trim() || null;
       s[extensionName].characterId = (chr.value || '').trim() || null;
       try { if (stresClient) stresClient.baseUrl = s[extensionName].serverUrl; } catch {}
       try { const ctx = window.SillyTavern?.getContext?.(); (ctx?.saveSettingsDebounced || window.saveSettingsDebounced)?.(); } catch {}
@@ -826,6 +995,12 @@ function integrateWithExtensionsManager() {
         const res = await fetch((url||'http://localhost:3001') + '/health');
         note.textContent = res.ok ? 'Healthy' : `HTTP ${res.status}`;
       } catch (e) { note.textContent = String(e?.message || e); }
+    });
+    btnLoadWp2.addEventListener('click', async () => {
+      const id = (wp.value || '').trim();
+      if (!id) { note.textContent = 'Enter a Worldpack ID first'; return; }
+      try { const r = await stresClient.loadWorldpackById(id); note.textContent = `Loaded ${r.id}@${r.version}`; }
+      catch(e){ note.textContent = String(e?.message || e); }
     });
   }
 
