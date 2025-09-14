@@ -2668,7 +2668,7 @@ const STRESChat = {
           meta.stres.combat.round = Number(meta.stres.combat.round||1);
           meta.stres.mode = meta.stres.mode || 'combat';
           try { ctx.saveMetadata?.(); } catch {}
-          await STRESCombat.refreshCombatHeaderInPrompt();
+          try { STRESCombat.refreshCombatHeaderInPrompt(); } catch {}
           const lines = rolls.map(r => `• ${r.name}: ${r.total} [${r.detail}]`);
           this.sendToChat(`Initiative order set (highest first):\n${lines.join('\n')}`);
         } catch (e) { this.sendToChat('❌ Initiative error: ' + (e?.message||e)); }
