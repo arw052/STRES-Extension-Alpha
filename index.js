@@ -84,6 +84,11 @@ const defaultSettings = {
     logToChat: false,
     keep: 20
   },
+  setup: {
+    enabled: true,
+    // If true, apply only once per chat unless explicitly reset
+    oncePerChat: true
+  },
   tools: {
     enabled: true,
     where: true,
@@ -130,6 +135,25 @@ try {
         extra: { api: 'manual', model: 'stres-npc', gen_id: Date.now() }
       };
       // Push and render
+      ctx?.chat?.push?.(message);
+      await ctx?.eventSource?.emit?.(ctx?.eventTypes?.MESSAGE_RECEIVED, (ctx.chat.length - 1), 'stres');
+      ctx?.addOneMessage?.(message);
+      await ctx?.eventSource?.emit?.(ctx?.eventTypes?.CHARACTER_MESSAGE_RENDERED, (ctx.chat.length - 1), 'stres');
+      await ctx?.saveChat?.();
+    } catch {}
+  };
+  // System-style message injector (for /stres feedback)
+  STRESChat.addSystemMessage = async function(text) {
+    try {
+      const ctx = window.SillyTavern?.getContext?.();
+      const message = {
+        name: 'STRES',
+        is_user: false,
+        is_system: true,
+        send_date: Date.now(),
+        mes: String(text||'').trim(),
+        extra: { api: 'stres', model: 'stres-system', gen_id: Date.now() }
+      };
       ctx?.chat?.push?.(message);
       await ctx?.eventSource?.emit?.(ctx?.eventTypes?.MESSAGE_RECEIVED, (ctx.chat.length - 1), 'stres');
       ctx?.addOneMessage?.(message);
@@ -381,6 +405,7 @@ const STRESNarrator = {
   init(ctx) {
     this.ctx = ctx || window.SillyTavern?.getContext?.() || null;
     // Attempt onboarding on first load per chat
+    this.applyCharacterConfig().catch(()=>{});
     this.maybeOnboard().catch(()=>{});
   },
   getMeta() {
@@ -388,6 +413,60 @@ const STRESNarrator = {
     const meta = ctx?.chatMetadata || (ctx.chatMetadata = {});
     meta.stres = meta.stres || {};
     return meta;
+  },
+  async readCharacterField(cid, key) {
+    const ctx = this.ctx || window.SillyTavern?.getContext?.();
+    try { if (ctx?.readExtensionField) return await ctx.readExtensionField(cid, key); } catch {}
+    try { const ch = ctx?.characters?.[cid]; if (ch?.extensions && key in ch.extensions) return ch.extensions[key]; } catch {}
+    try { const ch = ctx?.characters?.[cid]; if (ch && key in ch) return ch[key]; } catch {}
+    return undefined;
+  },
+  async applyCharacterConfig() {
+    try {
+      const ctx = this.ctx || window.SillyTavern?.getContext?.();
+      const cid = ctx?.characterId; if (!cid) return false;
+      const cfg = await this.readCharacterField(cid, 'stres');
+      const depth = await this.readCharacterField(cid, 'depth_prompt');
+      if (!cfg && !depth) return false;
+      const s = window.extension_settings || (ctx?.extensionSettings) || {};
+      s[extensionName] = s[extensionName] || structuredClone(defaultSettings);
+      if (cfg && typeof cfg === 'object') {
+        if (cfg.worldpackId) s[extensionName].worldpackId = cfg.worldpackId;
+        s[extensionName].world = s[extensionName].world || structuredClone(defaultSettings.world);
+        if (cfg.regionId) s[extensionName].world.regionId = cfg.regionId;
+        if (cfg.headerTemplate) {
+          s[extensionName].world.header = s[extensionName].world.header || structuredClone(defaultSettings.world.header);
+          s[extensionName].world.header.template = cfg.headerTemplate;
+        }
+        if (typeof cfg.primerEnabled === 'boolean') {
+          s[extensionName].budget = s[extensionName].budget || structuredClone(defaultSettings.budget);
+          s[extensionName].budget.components = s[extensionName].budget.components || {};
+          s[extensionName].budget.components.primer = s[extensionName].budget.components.primer || {};
+          s[extensionName].budget.components.primer.enabled = !!cfg.primerEnabled;
+        }
+        if (typeof cfg.ragEnabled === 'boolean') {
+          s[extensionName].rag = s[extensionName].rag || structuredClone(defaultSettings.rag);
+          s[extensionName].rag.enabled = !!cfg.ragEnabled;
+          s[extensionName].budget = s[extensionName].budget || structuredClone(defaultSettings.budget);
+          s[extensionName].budget.components = s[extensionName].budget.components || {};
+          s[extensionName].budget.components.rag = s[extensionName].budget.components.rag || {};
+          s[extensionName].budget.components.rag.enabled = !!cfg.ragEnabled;
+        }
+        if (cfg.budgetProfile) {
+          s[extensionName].budget = s[extensionName].budget || structuredClone(defaultSettings.budget);
+          s[extensionName].budget.profile = cfg.budgetProfile;
+        }
+      }
+      try { (ctx?.saveSettingsDebounced || window.saveSettingsDebounced)?.(); } catch {}
+      // Apply runtime effects
+      try {
+        if (s[extensionName].worldpackId) {
+          await stresClient.loadWorldpackById(s[extensionName].worldpackId).catch(()=>{});
+        }
+        await STRESPrompts.refreshSceneHeaderInPrompt();
+      } catch {}
+      return true;
+    } catch { return false; }
   },
   async maybeOnboard() {
     try {
@@ -1421,6 +1500,112 @@ const STRESTelemetry = {
   }
 };
 
+// Setup Wizard Listener: detects onboarding JSON in assistant messages and applies config
+const STRESSetup = {
+  ctx: null,
+  init(ctx) {
+    try {
+      this.ctx = ctx || window.SillyTavern?.getContext?.() || null;
+      const es = this.ctx?.eventSource; const ET = this.ctx?.eventTypes || {};
+      if (es && ET) {
+        es.on(ET.MESSAGE_RECEIVED, (m)=>{ this.onAssistantMessage(m).catch(()=>{}); });
+      }
+    } catch {}
+  },
+  getSettings() { const s = window.extension_settings?.[extensionName] || {}; return s.setup || defaultSettings.setup; },
+  getMeta() { const ctx = this.ctx || window.SillyTavern?.getContext?.(); const meta = ctx?.chatMetadata || (ctx.chatMetadata = {}); meta.stres = meta.stres || {}; return meta; },
+  isAssistantMessage(m) { try { return !!(m && m.is_user === false); } catch { return false; } },
+  extractSetupJSON(text) {
+    try {
+      const s = String(text||'');
+      // Look for fenced JSON with optional language tag
+      const fenceRe = /```(?:json|stres_setup)?\s*([\s\S]*?)```/gi;
+      let match;
+      while ((match = fenceRe.exec(s))) {
+        const body = match[1] || '';
+        try {
+          const obj = JSON.parse(body);
+          if (obj && (obj.type === 'stres_setup' || obj.setup === 'stres')) return obj;
+        } catch {}
+      }
+      // Fallback: try to parse any JSON-looking segment
+      const braceStart = s.indexOf('{');
+      const braceEnd = s.lastIndexOf('}');
+      if (braceStart !== -1 && braceEnd > braceStart) {
+        try { const obj = JSON.parse(s.slice(braceStart, braceEnd+1)); if (obj && (obj.type === 'stres_setup' || obj.setup === 'stres')) return obj; } catch {}
+      }
+    } catch {}
+    return null;
+  },
+  async onAssistantMessage(m) {
+    try {
+      if (!this.getSettings().enabled) return;
+      if (!this.isAssistantMessage(m)) return;
+      const meta = this.getMeta();
+      if (this.getSettings().oncePerChat && meta.stres.setup_complete) return;
+      const text = m?.mes || m?.text || '';
+      const obj = this.extractSetupJSON(text);
+      if (!obj) return;
+      const ok = await this.applySetup(obj);
+      if (ok) {
+        meta.stres.setup_complete = Date.now();
+        await this.ctx?.saveMetadata?.();
+      }
+    } catch {}
+  },
+  styleToHeader(style) {
+    const s = String(style||'').toLowerCase();
+    if (s.includes('tactic')) return '⚔️ {timeOfDay} • {weather} • 📍 {location}';
+    if (s.includes('cine')) return '📍 {location} • {date} • {timeOfDay} • {weather}';
+    return null;
+  },
+  async applySetup(data) {
+    try {
+      // Expected schema (example):
+      // { type: 'stres_setup', worldpackId, scenarioId?, regionId?, narratorStyle?, player? }
+      const ctx = this.ctx || window.SillyTavern?.getContext?.();
+      const s = window.extension_settings || (ctx?.extensionSettings) || {};
+      s[extensionName] = s[extensionName] || structuredClone(defaultSettings);
+      if (data.worldpackId) s[extensionName].worldpackId = String(data.worldpackId);
+      s[extensionName].world = s[extensionName].world || structuredClone(defaultSettings.world);
+      if (data.regionId) s[extensionName].world.regionId = String(data.regionId);
+      const hdr = this.styleToHeader(data.narratorStyle);
+      if (hdr) {
+        s[extensionName].world.header = s[extensionName].world.header || structuredClone(defaultSettings.world.header);
+        s[extensionName].world.header.template = hdr;
+      }
+      try { (ctx?.saveSettingsDebounced || window.saveSettingsDebounced)?.(); } catch {}
+      // Load worldpack & apply scenario/region
+      if (data.worldpackId) {
+        try { await stresClient.loadWorldpackById(String(data.worldpackId)); } catch {}
+      }
+      if (data.scenarioId) {
+        try { await STRESWorld.scenario(String(data.scenarioId)); } catch {}
+      } else if (data.regionId) {
+        try { await STRESWorld.refresh(String(data.regionId)); } catch {}
+      }
+      // Optional: set depth prompt on the active character based on style
+      try {
+        const style = String(data.narratorStyle||'');
+        const tactical = /tactic/i.test(style);
+        const prompt = tactical
+          ? 'You are the Narrator/DM. Keep tactical clarity and explicit turn order in combat. Offer clear options (Attack, Maneuver, Observe, Talk, Item, Retreat) without railroading. Do not reveal secret DCs or private knowledge. Keep narration concise and grounded in the Euterra worldpack.'
+          : STRESNarrator.defaultDepthPrompt();
+        await STRESNarrator.setDepthPrompt(prompt);
+      } catch {}
+      try { await STRESPrompts.refreshSceneHeaderInPrompt(); } catch {}
+      // Optional: stash player concept/state in metadata for tools
+      try {
+        const meta = this.getMeta();
+        meta.stres.player = data.player || meta.stres.player || null;
+        await ctx.saveMetadata?.();
+      } catch {}
+      STRESChat.sendToChat('✅ STRES setup applied. You can now begin: /stres scenarios → /stres start <index|id>');
+      return true;
+    } catch { return false; }
+  }
+};
+
 // Rolling summaries and structured state capture
 const STRESSummary = {
   ctx: null,
@@ -1818,12 +2003,13 @@ const STRESChat = {
           const sub = (parts[2]||'').toLowerCase();
           if (!sub || sub === 'status') { (async()=>{ await STRESNarrator.showStatus(); })(); return ''; }
           if (sub === 'bind') { (async()=>{ const r = await STRESNarrator.bindToCurrentCharacter(); this.sendToChat(r.ok ? '✅ Bound STRES config to current character' : ('❌ ' + (r.error||'Failed'))); })(); return ''; }
+          if (sub === 'apply') { (async()=>{ const ok = await STRESNarrator.applyCharacterConfig(); this.sendToChat(ok ? '✅ Applied card config' : '❌ No card config found'); try { await STRESPrompts.refreshSceneHeaderInPrompt(); } catch {} })(); return ''; }
           if (sub === 'depth') {
             const text = parts.slice(3).join(' ').trim();
             (async()=>{ const r = await STRESNarrator.setDepthPrompt(text||STRESNarrator.defaultDepthPrompt()); this.sendToChat(r.ok ? '✅ Depth prompt saved to card' : ('❌ ' + (r.error||'Failed'))); })();
             return '';
           }
-          this.sendToChat('Usage: /stres narrator [status|bind|depth <text>]');
+          this.sendToChat('Usage: /stres narrator [status|bind|apply|depth <text>]');
           return '';
         }
         case 'cost': {
@@ -2609,7 +2795,7 @@ const STRESChat = {
 • /stres where - Show current location/time/weather
 • /stres tick <duration> - Advance sim time (e.g., 2h, 30m)
 • /stres onboard - Post quick onboarding steps
-• /stres narrator [status|bind|depth <text>] - Bind portable config and set depth prompt
+• /stres narrator [status|bind|apply|depth <text>] - Apply/bind portable config; set depth prompt
 • /stres probe - Probe API endpoints (health, worldpack, sim)
 • /stres join - Reconnect WebSocket
 • /stres campaign - Show campaign info
@@ -2776,20 +2962,20 @@ const STRESChat = {
   },
 
   sendToChat(message) {
-    // Try to use SillyTavern's chat system if available
-    if (window.SillyTavern && typeof window.SillyTavern.sendSystemMessage === 'function') {
-      window.SillyTavern.sendSystemMessage(message);
-    } else {
-      // Fallback to console
-      console.log('[STRES]', message);
-      // Try to insert into chat manually
-      const chatContainer = document.querySelector('#chat');
-      if (chatContainer) {
-        const messageElement = document.createElement('div');
-        messageElement.className = 'mes stres-message';
-        messageElement.innerHTML = `<div class="mes_text">${message.replace(/\n/g, '<br>')}</div>`;
-        chatContainer.appendChild(messageElement);
+    try {
+      if (typeof STRESChat.addSystemMessage === 'function') {
+        STRESChat.addSystemMessage(String(message||''));
+        return;
       }
+    } catch {}
+    // Fallback to console and manual insert if context API missing
+    console.log('[STRES]', message);
+    const chatContainer = document.querySelector('#chat');
+    if (chatContainer) {
+      const messageElement = document.createElement('div');
+      messageElement.className = 'mes stres-message';
+      messageElement.innerHTML = `<div class="mes_text">${String(message||'').replace(/\n/g, '<br>')}</div>`;
+      chatContainer.appendChild(messageElement);
     }
   }
 };
@@ -2880,6 +3066,9 @@ async function initializeExtension() {
 
   // Initialize Narrator & Onboarding
   try { STRESNarrator.init(context); } catch {}
+
+  // Initialize Setup Wizard listener
+  try { STRESSetup.init(context); } catch {}
 
   // Initialize Telemetry
   try { STRESTelemetry.init(context); } catch {}
