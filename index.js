@@ -9,10 +9,17 @@ const defaultSettings = {
   worldpackId: null,
   chatCampaigns: {},
   autoBindCampaignToChat: true,
+  world: {
+    regionId: null,
+    locationName: '',
+    locationType: '',
+    header: { enabled: true, template: '📍 {location} • {date} • {timeOfDay} • {weather}' }
+  },
   autoInjection: {
     enabled: true,
     mode: "basic",
-    frequency: "every_message"
+    frequency: "every_message",
+    primer: true
   },
   ui: {
     theme: "fantasy",
@@ -33,6 +40,161 @@ let toolIntegration;
 let lorebookManager;
 let characterCardManager;
 let worldMapViewer;
+
+// STRES World/Sim helper
+const STRESWorld = {
+  lastState: null,
+  lastFetch: 0,
+  fetchCooldownMs: 8000,
+  observer: null,
+  manifestCache: null,
+  manifestFetchedAt: 0,
+  manifestTtlMs: 15000,
+
+  async refresh(regionHint) {
+    const s = window.extension_settings?.[extensionName] || {};
+    const regionId = (regionHint || s.world?.regionId || '').trim() || undefined;
+    try {
+      const qp = regionId ? `?regionId=${encodeURIComponent(regionId)}` : '';
+      const api = (s.serverUrl || defaultSettings.serverUrl) + '/api/sim/state' + qp;
+      const res = await fetch(api);
+      const j = await res.json();
+      if (j?.success) { this.lastState = j.data; this.lastFetch = Date.now(); }
+    } catch {}
+    return this.lastState;
+  },
+
+  async getStateFresh() {
+    if (!this.lastState || (Date.now() - this.lastFetch) > this.fetchCooldownMs) {
+      await this.refresh();
+    }
+    return this.lastState;
+  },
+
+  async getManifestFresh() {
+    const now = Date.now();
+    if (!this.manifestCache || (now - this.manifestFetchedAt) > this.manifestTtlMs) {
+      try {
+        const res = await stresClient.getWorldpackManifest();
+        if (res?.success && res.manifest) {
+          this.manifestCache = res.manifest;
+          this.manifestFetchedAt = now;
+        }
+      } catch {}
+    }
+    return this.manifestCache;
+  },
+
+  formatHeader() {
+    const s = window.extension_settings?.[extensionName] || {};
+    const hdr = (s.world?.header) || defaultSettings.world.header;
+    const st = this.lastState;
+    const loc = (s.world?.locationName || s.world?.regionId || 'Unknown').trim() || 'Unknown';
+    if (!st) return `📍 ${loc}`;
+    const md = `${st.time?.month || ''} ${st.time?.day || ''}`.trim();
+    const date = md || st.time?.iso?.slice(0,10) || 'Date?';
+    const tod = st.time?.daySegment || 'time?';
+    const weather = st.weather?.condition || 'clear';
+    return (hdr.template || defaultSettings.world.header.template)
+      .replace('{location}', loc)
+      .replace('{date}', date)
+      .replace('{timeOfDay}', tod)
+      .replace('{weather}', weather);
+  },
+
+  async ensureHeaderForElement(mesEl) {
+    try {
+      const s = window.extension_settings?.[extensionName] || {};
+      if (!(s.world?.header?.enabled)) return;
+      if (!mesEl || mesEl.dataset?.stresHeaderApplied === '1') return;
+      // Heuristic: apply to assistant messages only (non-right aligned)
+      const isUser = mesEl.classList?.contains('right') || mesEl.classList?.contains('mes-user');
+      if (isUser) return;
+      const textEl = mesEl.querySelector('.mes_text') || mesEl.querySelector('.mes_text p') || mesEl;
+      if (!textEl) return;
+      // Skip if it already starts with our symbol
+      const raw = textEl.innerHTML || '';
+      if (/^\s*📍/.test(raw)) { mesEl.dataset.stresHeaderApplied = '1'; return; }
+      // Update state if needed
+      await this.getStateFresh();
+      const header = this.formatHeader();
+      textEl.innerHTML = `${header}\n\n${raw}`;
+      mesEl.dataset.stresHeaderApplied = '1';
+    } catch {}
+  },
+
+  observeChat() {
+    try {
+      const container = document.getElementById('chat') || document.body;
+      if (!container || this.observer) return;
+      this.observer = new MutationObserver((mutations) => {
+        for (const m of mutations) {
+          if (m.type !== 'childList') continue;
+          m.addedNodes?.forEach((node) => {
+            try {
+              if (!(node instanceof HTMLElement)) return;
+              if (node.classList?.contains('mes')) this.ensureHeaderForElement(node);
+              // nested nodes
+              node.querySelectorAll?.('.mes').forEach((el)=> this.ensureHeaderForElement(el));
+            } catch {}
+          });
+        }
+      });
+      this.observer.observe(container, { childList: true, subtree: true });
+    } catch {}
+  },
+
+  async scenario(idOrIndex) {
+    const s = window.extension_settings?.[extensionName] || {};
+    s.world = s.world || structuredClone(defaultSettings.world);
+    let sel = null;
+    try {
+      const mf = await this.getManifestFresh();
+      const scenarios = Array.isArray(mf?.scenarios) ? mf.scenarios : [];
+      if (scenarios.length) {
+        const byIndex = scenarios[Number(idOrIndex) - 1];
+        sel = scenarios.find(sc => sc.id === idOrIndex) || byIndex || null;
+        if (sel) {
+          const region = (Array.isArray(mf.regions) ? mf.regions : []).find(r => r.id === sel.regionId);
+          sel = {
+            regionId: sel.regionId,
+            locationName: sel.locationName || region?.name || sel.regionId,
+            factors: sel.factors || region?.factors || { biome: region?.biome }
+          };
+        }
+      }
+    } catch {}
+    // Fallback mapping if manifest doesn’t define scenarios/regions
+    if (!sel) {
+      const fallback = {
+        '1': { regionId: 'veyra-capital', locationName: 'Veyrion Citadel', factors: { biome: 'urban', distanceToCoast: 30, elevation: 120, aridity: 0.4 } },
+        '2': { regionId: 'calvessia-capital', locationName: 'Calvess, Sea-Kings’ Hall', factors: { biome: 'coastal', distanceToCoast: 2, elevation: 15, aridity: 0.5 } },
+        '3': { regionId: 'veyra-capital', locationName: 'Veyrion Grand Market', factors: { biome: 'urban', distanceToCoast: 30, elevation: 120, aridity: 0.4 } },
+        '4': { regionId: 'greenwood-edge', locationName: 'Hamlet at Greenwood Edge', factors: { biome: 'forest', distanceToCoast: 80, elevation: 300, aridity: 0.3 } },
+        '5': { regionId: 'veyra-capital', locationName: 'Veyrion City (Inn Loft)', factors: { biome: 'urban', distanceToCoast: 30, elevation: 120, aridity: 0.4 } }
+      };
+      sel = fallback[String(idOrIndex)];
+    }
+    if (!sel) return { ok: false, message: 'Unknown scenario id' };
+    s.world.regionId = sel.regionId;
+    s.world.locationName = sel.locationName;
+    try {
+      const apiBase = s.serverUrl || defaultSettings.serverUrl;
+      await fetch(`${apiBase}/api/sim/region`, { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ regionId: sel.regionId, factors: sel.factors }) });
+    } catch {}
+    try { const ctx = window.SillyTavern?.getContext?.(); (ctx?.saveSettingsDebounced || window.saveSettingsDebounced)?.(); } catch {}
+    await this.refresh(sel.regionId);
+    return { ok: true, regionId: sel.regionId, locationName: sel.locationName };
+  },
+
+  async listScenarios() {
+    try {
+      const mf = await this.getManifestFresh();
+      const scs = Array.isArray(mf?.scenarios) ? mf.scenarios : [];
+      return scs.map((s, i) => ({ index: i+1, id: s.id, label: s.label, regionId: s.regionId, locationName: s.locationName }));
+    } catch { return []; }
+  }
+};
 
 // STRES API Client
 class STRESClient {
@@ -81,6 +243,13 @@ class STRESClient {
     const j = await res.json().catch(()=>({}));
     if (!res.ok) throw new Error(j?.error?.message || `HTTP ${res.status}`);
     return j;
+  }
+
+  async getWorldpackManifest() {
+    try {
+      const res = await this.request('/worldpack/manifest');
+      return res;
+    } catch (error) { return { success: false, error: error.message }; }
   }
 }
 
@@ -186,12 +355,68 @@ const STRESChat = {
           this.sendToChat('Usage: /stres worldpack [status|load <packId>]');
           return '';
         }
+        case 'start': {
+          const sid = (parts[2]||'').trim();
+          if (!sid) { this.sendToChat('Usage: /stres start <1|2|3|4|5>'); return ''; }
+          STRESWorld.scenario(sid).then((r)=>{
+            if (r.ok) this.sendToChat(`✅ Scenario ${sid} set — ${r.locationName} [${r.regionId}]`);
+            else this.sendToChat('❌ ' + (r.message||'Failed'));
+          });
+          return '';
+        }
+        case 'scenarios': {
+          (async ()=>{
+            const list = await STRESWorld.listScenarios();
+            if (!list.length) { this.sendToChat('No scenarios found in active worldpack. Use /stres set region <id> to set manually.'); return ''; }
+            const lines = list.map(s => `${s.index}. ${s.label} — ${s.locationName} [${s.regionId}] (id: ${s.id})`).join('\n');
+            this.sendToChat(`**Available Scenarios**\n${lines}`);
+          })();
+          return '';
+        }
+        case 'where': {
+          (async()=>{
+            await STRESWorld.refresh();
+            const hdr = STRESWorld.formatHeader();
+            this.sendToChat(`**Location**\n${hdr}`);
+          })();
+          return '';
+        }
+        case 'tick': {
+          const adv = (parts[2]||'').trim() || '2h';
+          (async()=>{
+            try {
+              const s = window.extension_settings?.[extensionName] || {};
+              const api = (s.serverUrl || defaultSettings.serverUrl) + '/api/sim/tick?advance=' + encodeURIComponent(adv) + (s.world?.regionId ? ('&regionId='+encodeURIComponent(s.world.regionId)) : '');
+              const r = await fetch(api, { method: 'POST' });
+              const j = await r.json();
+              if (j?.success) {
+                STRESWorld.lastState = j.state; STRESWorld.lastFetch = Date.now();
+                this.sendToChat(`⏱️ Advanced time by ${adv}.`);
+              } else {
+                this.sendToChat('❌ Failed to advance time');
+              }
+            } catch(e){ this.sendToChat('❌ Error: ' + (e?.message||e)); }
+          })();
+          return '';
+        }
+        case 'set': {
+          // handled below; extend with region support
+        }
         case 'join':
           this.rejoinWebSocket();
           return '';
         case 'campaign':
           this.showCampaign();
           return '';
+        case 'inject': {
+          const sub = (parts[2]||'').toLowerCase();
+          if (sub === 'primer') {
+            this.injectWorldpackPrimer(true);
+            return '';
+          }
+          this.sendToChat('Usage: /stres inject primer');
+          return '';
+        }
         case 'settings':
           try { window.STRES?.toggleSettings?.(); } catch {}
           this.sendToChat('⚙️ Opened STRES settings panel');
@@ -224,11 +449,16 @@ const STRESChat = {
             try { const ctx = window.SillyTavern?.getContext?.(); (ctx?.saveSettingsDebounced || window.saveSettingsDebounced)?.(); } catch {}
             try { window.STRES?.refreshSettingsUI?.(); } catch {}
             this.sendToChat(`✅ Worldpack ID set to ${s[extensionName].worldpackId || 'None'}`);
+          } else if (key === 'region') {
+            s[extensionName].world = s[extensionName].world || structuredClone(defaultSettings.world);
+            s[extensionName].world.regionId = value || null;
+            try { const ctx = window.SillyTavern?.getContext?.(); (ctx?.saveSettingsDebounced || window.saveSettingsDebounced)?.(); } catch {}
+            STRESWorld.refresh(value).then(()=>this.sendToChat(`✅ Region set to ${value}`));
           } else if (key === 'char' || key === 'character') {
             s[extensionName].characterId = value || null;
             this.sendToChat(`✅ Character ID set to ${s[extensionName].characterId || 'None'}`);
           } else {
-            this.sendToChat('Usage: /stres set campaign <id> | /stres set worldpack <id> | /stres set character <id>');
+            this.sendToChat('Usage: /stres set campaign <id> | /stres set worldpack <id> | /stres set region <id> | /stres set character <id>');
             return '';
           }
           try { const ctx = window.SillyTavern?.getContext?.(); (ctx?.saveSettingsDebounced || window.saveSettingsDebounced)?.(); } catch {}
@@ -324,10 +554,58 @@ const STRESChat = {
       try { const ctx = window.SillyTavern?.getContext?.(); (ctx?.saveSettingsDebounced || window.saveSettingsDebounced)?.(); } catch {}
       try { window.STRES?.refreshSettingsUI?.(); } catch {}
       this.sendToChat(`✅ Loaded worldpack ${res.id}@${res.version}`);
+      try { const ai = s[extensionName].autoInjection; if (ai?.enabled && ai?.primer) { await this.injectWorldpackPrimer(); } } catch {}
     } catch (e) {
       this.sendToChat(`❌ Failed to load worldpack: ${e?.message || e}`);
     }
     return '';
+  },
+
+  async injectWorldpackPrimer(force=false) {
+    try {
+      const s = window.extension_settings?.[extensionName] || {};
+      if (!force) { const ai = s.autoInjection; if (!(ai?.enabled && ai?.primer)) return ''; }
+      const res = await stresClient.getWorldpackManifest();
+      if (!res || !res.success) { this.sendToChat('❌ No active worldpack to summarize'); return ''; }
+      const { id, version, manifest } = res;
+      const primer = this.buildWorldpackPrimer(manifest);
+      const msg = `**World Primer — ${manifest.name || id} (v${version})**\n${primer}`;
+      // Prefer SillyTavern system message if available
+      if (window.SillyTavern?.sendSystemMessage) window.SillyTavern.sendSystemMessage(msg); else this.sendToChat(msg);
+      return '';
+    } catch (e) { this.sendToChat('❌ Failed to inject primer: ' + (e?.message||e)); return ''; }
+  },
+
+  buildWorldpackPrimer(manifest) {
+    try {
+      const lines = [];
+      lines.push(`• Setting: ${manifest.metadata?.setting || 'fantasy'}; Genre: ${manifest.metadata?.genre || 'fantasy'}`);
+      if (manifest.races?.length) {
+        const raceList = manifest.races.map(r=>r.name||r.id).slice(0,6).join(', ');
+        lines.push(`• Races: ${raceList}`);
+      }
+      if (manifest.naming) {
+        const cultures = Object.keys(manifest.naming).slice(0,6);
+        lines.push(`• Naming cultures: ${cultures.join(', ')}`);
+      }
+      if (manifest.crafting?.skills?.length) {
+        lines.push(`• Crafting: ${manifest.crafting.skills.map(s=>s.name||s.id).join(', ')}`);
+      }
+      const biomes = Object.keys(manifest.spawns?.biomes||{});
+      if (biomes.length) lines.push(`• Biomes: ${biomes.join(', ')}`);
+      if (manifest.creatures?.length) {
+        const keyCreatures = manifest.creatures.map(c=>c.name||c.id).slice(0,8).join(', ');
+        lines.push(`• Creatures: ${keyCreatures}`);
+      }
+      if (manifest.economy?.basePrices) {
+        const items = Object.keys(manifest.economy.basePrices).slice(0,6).map(k=>`${k}:${manifest.economy.basePrices[k]}`).join(', ');
+        lines.push(`• Prices (sample): ${items}`);
+      }
+      if (manifest.combat?.initiative?.formula) lines.push(`• Initiative: ${manifest.combat.initiative.formula}`);
+      if (manifest.terminology && Object.keys(manifest.terminology).length) lines.push(`• Terms: ${Object.entries(manifest.terminology).map(([k,v])=>`${k}→${v}`).slice(0,6).join(', ')}`);
+      lines.push('• Style: grounded, realistic harvests; wildlife seldom drops weapons. Weather/time/season/region affect encounters.');
+      return lines.join('\n');
+    } catch { return '• Summary unavailable'; }
   },
 
   resetSettings() {
@@ -395,6 +673,10 @@ const STRESChat = {
 • /stres status - Show STRES status
 • /stres worldpack - Show active worldpack
 • /stres worldpack load <id> - Load worldpack by ID
+• /stres scenarios - List worldpack-provided scenarios
+• /stres start <id|index> - Set scenario and region
+• /stres where - Show current location/time/weather
+• /stres tick <duration> - Advance sim time (e.g., 2h, 30m)
 • /stres join - Reconnect WebSocket
 • /stres campaign - Show campaign info
 • /stres showchat - Show current chat and bound campaign
@@ -403,7 +685,9 @@ const STRESChat = {
 • /stres setapi <url> - Set API base URL
 • /stres set campaign <id> - Set campaign ID
 • /stres set worldpack <id> - Set worldpack ID
+• /stres set region <id> - Set region ID for sim
 • /stres set character <id> - Set character ID
+• /stres inject primer - Inject worldpack primer
 • /stres reset - Reset settings to defaults
 • /stres debug - Show debug information
 • /stres fixport - Fix API port configuration
@@ -583,6 +867,7 @@ async function initializeExtension() {
     const s = window.extension_settings[extensionName];
     if (s.worldpackId) {
       stresClient.loadWorldpackById(s.worldpackId).catch(()=>{});
+      try { const ai = s.autoInjection; if (ai?.enabled && ai?.primer) { setTimeout(()=>{ STRESChat.injectWorldpackPrimer().catch(()=>{}); }, 200); } } catch {}
     }
   } catch {}
 
@@ -733,12 +1018,30 @@ function initializeUI() {
     const inpWp = doc.createElement('input'); inpWp.type = 'text'; inpWp.id = 'stres-worldpack-id'; inpWp.placeholder = 'euterra-test-0.35.2'; inpWp.value = settings.worldpackId || '';
     fldWp.appendChild(lblWp); fldWp.appendChild(inpWp);
 
+    const fldRegion = doc.createElement('div'); fldRegion.className = 'stres-field';
+    const lblRegion = doc.createElement('label'); lblRegion.setAttribute('for','stres-region-id'); lblRegion.textContent = 'Region ID';
+    const inpRegion = doc.createElement('input'); inpRegion.type = 'text'; inpRegion.id = 'stres-region-id'; inpRegion.placeholder = 'veyra-capital / greenwood-edge'; inpRegion.value = (settings.world?.regionId) || '';
+    fldRegion.appendChild(lblRegion); fldRegion.appendChild(inpRegion);
+
+    const fldLoc = doc.createElement('div'); fldLoc.className = 'stres-field';
+    const lblLoc = doc.createElement('label'); lblLoc.setAttribute('for','stres-location-name'); lblLoc.textContent = 'Location Label';
+    const inpLoc = doc.createElement('input'); inpLoc.type = 'text'; inpLoc.id = 'stres-location-name'; inpLoc.placeholder = 'Veyrion Citadel'; inpLoc.value = (settings.world?.locationName) || '';
+    fldLoc.appendChild(lblLoc); fldLoc.appendChild(inpLoc);
+
     const fldChar = doc.createElement('div'); fldChar.className = 'stres-field';
     const lblChar = doc.createElement('label'); lblChar.setAttribute('for','stres-character-id'); lblChar.textContent = 'Character ID';
     const inpChar = doc.createElement('input'); inpChar.type = 'text'; inpChar.id = 'stres-character-id'; inpChar.placeholder = '0000-...'; inpChar.value = settings.characterId || '';
     fldChar.appendChild(lblChar); fldChar.appendChild(inpChar);
 
-    secConn.appendChild(hConn); secConn.appendChild(fldApi); secConn.appendChild(fldCampaign); secConn.appendChild(fldWp); secConn.appendChild(fldChar);
+    const fldHdr = doc.createElement('div'); fldHdr.className = 'stres-field';
+    const lblHdr = doc.createElement('label'); lblHdr.textContent = 'Scene Header';
+    const cbHdr = doc.createElement('input'); cbHdr.type = 'checkbox'; cbHdr.id = 'stres-header-enabled'; cbHdr.checked = !!(settings.world?.header?.enabled ?? true);
+    const hdrWrap = doc.createElement('div'); hdrWrap.style.display='flex'; hdrWrap.style.alignItems='center'; hdrWrap.style.gap='8px';
+    const hdrTmpl = doc.createElement('input'); hdrTmpl.type = 'text'; hdrTmpl.id = 'stres-header-tmpl'; hdrTmpl.placeholder = '📍 {location} • {date} • {timeOfDay} • {weather}'; hdrTmpl.style.flex='1'; hdrTmpl.value = (settings.world?.header?.template) || defaultSettings.world.header.template;
+    hdrWrap.append(cbHdr, hdrTmpl);
+    fldHdr.appendChild(lblHdr); fldHdr.appendChild(hdrWrap);
+
+    secConn.appendChild(hConn); secConn.appendChild(fldApi); secConn.appendChild(fldCampaign); secConn.appendChild(fldWp); secConn.appendChild(fldRegion); secConn.appendChild(fldLoc); secConn.appendChild(fldChar); secConn.appendChild(fldHdr);
     content.appendChild(secConn);
 
     // Footer
@@ -801,6 +1104,12 @@ function initializeUI() {
       s[extensionName].campaignId = inpCamp.value.trim() || null;
       s[extensionName].worldpackId = inpWp.value.trim() || null;
       s[extensionName].characterId = inpChar.value.trim() || null;
+      s[extensionName].world = s[extensionName].world || structuredClone(defaultSettings.world);
+      s[extensionName].world.regionId = inpRegion.value.trim() || null;
+      s[extensionName].world.locationName = inpLoc.value.trim() || '';
+      s[extensionName].world.header = s[extensionName].world.header || structuredClone(defaultSettings.world.header);
+      s[extensionName].world.header.enabled = !!cbHdr.checked;
+      s[extensionName].world.header.template = hdrTmpl.value || defaultSettings.world.header.template;
       try {
         const ctx = window.SillyTavern?.getContext?.();
         (ctx?.saveSettingsDebounced || window.saveSettingsDebounced)?.();
@@ -862,6 +1171,8 @@ function initializeUI() {
   })();
 
   console.log("[STRES] UI components initialized");
+  // Start observing chat to preface LLM messages with header
+  try { STRESWorld.observeChat(); } catch {}
 }
 
 // Hook into chat input for additional processing
@@ -933,7 +1244,10 @@ function integrateWithExtensionsManager() {
     const api = doc.createElement('input'); api.type = 'text'; api.id = 'stres-em-api-url'; api.placeholder = 'http://localhost:3001'; api.style.width='100%';
     const camp = doc.createElement('input'); camp.type = 'text'; camp.id = 'stres-em-campaign-id'; camp.placeholder = 'default-campaign'; camp.style.width='100%';
     const wp = doc.createElement('input'); wp.type = 'text'; wp.id = 'stres-em-worldpack-id'; wp.placeholder = 'euterra-test-0.35.2'; wp.style.width='100%';
-    const chr = doc.createElement('input'); chr.type = 'text'; chr.id = 'stres-em-character-id'; chr.placeholder = '0000-...'; chr.style.width='100%';
+    const region = doc.createElement('input'); region.type = 'text'; region.id = 'stres-em-region-id'; region.placeholder = 'veyra-capital / greenwood-edge'; region.style.width='100%';
+    const loc = doc.createElement('input'); loc.type = 'text'; loc.id = 'stres-em-location-name'; loc.placeholder = 'Veyrion Citadel'; loc.style.width='100%';
+    const hdrOn = doc.createElement('input'); hdrOn.type = 'checkbox'; hdrOn.id = 'stres-em-hdr-on';
+    const hdrT = doc.createElement('input'); hdrT.type = 'text'; hdrT.id = 'stres-em-hdr-tmpl'; hdrT.placeholder = '📍 {location} • {date} • {timeOfDay} • {weather}'; hdrT.style.width='100%';
 
     // Buttons
     const actions = doc.createElement('div'); actions.style.display='flex'; actions.style.gap='8px'; actions.style.marginTop='8px';
@@ -949,6 +1263,9 @@ function integrateWithExtensionsManager() {
       fld('API Base URL', api),
       fld('Campaign ID', camp),
       fld('Worldpack ID', wp),
+      fld('Region ID', region),
+      fld('Location Label', loc),
+      (function(){ const wrap = doc.createElement('div'); wrap.style.margin='6px 0'; const lab = doc.createElement('label'); lab.textContent = 'Scene Header'; lab.style.display='block'; lab.style.fontSize='12px'; lab.style.opacity='0.8'; const row = doc.createElement('div'); row.style.display='flex'; row.style.alignItems='center'; row.style.gap='8px'; const tlabel = doc.createElement('span'); tlabel.textContent='Enabled'; row.append(hdrOn, tlabel, hdrT); wrap.append(lab, row); return wrap; })(),
       fld('Character ID', chr),
       actions,
       note
@@ -971,6 +1288,10 @@ function integrateWithExtensionsManager() {
       api.value = s.serverUrl || defaultSettings.serverUrl;
       camp.value = s.campaignId || '';
       wp.value = s.worldpackId || '';
+      region.value = s.world?.regionId || '';
+      loc.value = s.world?.locationName || '';
+      hdrOn.checked = !!(s.world?.header?.enabled ?? true);
+      hdrT.value = s.world?.header?.template || defaultSettings.world.header.template;
       chr.value = s.characterId || '';
     }
     refresh();
@@ -983,6 +1304,12 @@ function integrateWithExtensionsManager() {
       s[extensionName].serverUrl = (api.value || '').trim().replace(/\/$/, '') || defaultSettings.serverUrl;
       s[extensionName].campaignId = (camp.value || '').trim() || null;
       s[extensionName].worldpackId = (wp.value || '').trim() || null;
+      s[extensionName].world = s[extensionName].world || structuredClone(defaultSettings.world);
+      s[extensionName].world.regionId = (region.value || '').trim() || null;
+      s[extensionName].world.locationName = (loc.value || '').trim() || '';
+      s[extensionName].world.header = s[extensionName].world.header || structuredClone(defaultSettings.world.header);
+      s[extensionName].world.header.enabled = !!hdrOn.checked;
+      s[extensionName].world.header.template = (hdrT.value || '').trim() || defaultSettings.world.header.template;
       s[extensionName].characterId = (chr.value || '').trim() || null;
       try { if (stresClient) stresClient.baseUrl = s[extensionName].serverUrl; } catch {}
       try { const ctx = window.SillyTavern?.getContext?.(); (ctx?.saveSettingsDebounced || window.saveSettingsDebounced)?.(); } catch {}
