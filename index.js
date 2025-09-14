@@ -2667,7 +2667,7 @@ const STRESChat = {
           meta.stres.combat.order = rolls.map(r => r.name);
           meta.stres.combat.round = Number(meta.stres.combat.round||1);
           meta.stres.mode = meta.stres.mode || 'combat';
-          await ctx.saveMetadata?.();
+          try { ctx.saveMetadata?.(); } catch {}
           await STRESCombat.refreshCombatHeaderInPrompt();
           const lines = rolls.map(r => `• ${r.name}: ${r.total} [${r.detail}]`);
           this.sendToChat(`Initiative order set (highest first):\n${lines.join('\n')}`);
