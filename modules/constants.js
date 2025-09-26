@@ -20,9 +20,10 @@ export const defaultSettings = {
       summaries: { enabled: false, maxTokens: 250, sticky: false },
       rag: { enabled: false, maxTokens: 300, topK: 2, sticky: false },
       npc: { enabled: false, maxTokens: 400, sticky: false },
+      hud: { enabled: false, maxTokens: 200, sticky: true },
       combat: { enabled: true, maxTokens: 220, sticky: true },
     },
-    degrade: { order: ['rag', 'npc', 'summaries', 'primer', 'header', 'combat'] },
+    degrade: { order: ['rag', 'npc', 'summaries', 'primer', 'hud', 'header', 'combat'] },
   },
   rag: {
     enabled: false,

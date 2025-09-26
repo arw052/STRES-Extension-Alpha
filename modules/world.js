@@ -93,32 +93,55 @@ export const STRESWorld = {
   },
 
   formatHeader() {
+    const ctx = window.SillyTavern?.getContext?.() || null;
     const settings = window.extension_settings?.[extensionName] || {};
+    const meta = ctx?.chatMetadata?.stres || {};
+    const scenarioHeader = meta?.latestScenario?.sceneHeader || null;
     const hdr = settings.world?.header || defaultSettings.world.header;
     const st = this.lastState;
-    const loc = (settings.world?.locationName || settings.world?.regionId || 'Unknown').trim() || 'Unknown';
+
+    const metadata = scenarioHeader?.metadata || {};
+    const loc = (metadata.locationName || metadata.location || settings.world?.locationName || settings.world?.regionId || 'Unknown').trim() || 'Unknown';
+    const rawDate = metadata.date || metadata.dateLabel;
+    const rawTime = metadata.timeOfDay || metadata.timeSegment;
+    const rawWeather = metadata.weather || metadata.conditions;
+
     const baseHeader = (template) => {
-      if (!st) return `📍 ${loc}`;
-      const md = `${st.time?.month || ''} ${st.time?.day || ''}`.trim();
-      const date = md || st.time?.iso?.slice(0, 10) || 'Date?';
-      const tod = st.time?.daySegment || 'time?';
-      const weather = st.weather?.condition || 'clear';
-      return template
+      const tpl = template || defaultSettings.world.header.template;
+      const dateCandidate = rawDate || (() => {
+        if (!st) return 'Date?';
+        const md = `${st.time?.month || ''} ${st.time?.day || ''}`.trim();
+        return md || st.time?.iso?.slice(0, 10) || 'Date?';
+      })();
+      const timeCandidate = rawTime || (st?.time?.daySegment || 'time?');
+      const weatherCandidate = rawWeather || (st?.weather?.condition || 'clear');
+      return tpl
         .replace('{location}', loc)
-        .replace('{date}', date)
-        .replace('{timeOfDay}', tod)
-        .replace('{weather}', weather);
+        .replace('{date}', dateCandidate)
+        .replace('{timeOfDay}', timeCandidate)
+        .replace('{weather}', weatherCandidate);
     };
-    let badge = '';
+
+    const prefixParts = [];
     try {
       const cs = settings.cost || defaultSettings.cost;
       if (cs.enabled && cs.showBadge) {
         const t = settings.cost?.lastBadge?.text || '';
-        if (t) badge = t + ' • ';
+        if (t) prefixParts.push(t);
       }
     } catch {}
-    const inner = baseHeader(hdr.template || defaultSettings.world.header.template);
-    return `${badge}${inner}`;
+
+    if (Array.isArray(scenarioHeader?.badges)) {
+      for (const badge of scenarioHeader.badges) {
+        const text = String(badge || '').trim();
+        if (text) prefixParts.push(text);
+      }
+    }
+
+    const templateToUse = scenarioHeader?.template || hdr.template || defaultSettings.world.header.template;
+    const inner = baseHeader(templateToUse);
+    if (!prefixParts.length) return inner;
+    return `${prefixParts.join(' • ')} • ${inner}`;
   },
 
   async ensureHeaderForElement(mesEl) {

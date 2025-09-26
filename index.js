@@ -2,6 +2,7 @@ import { extensionName, defaultSettings } from './modules/constants.js';
 import { state } from './modules/state.js';
 import STRESWorld from './modules/world.js';
 import { createOnboarding } from './modules/onboarding.js';
+import createScenarioReducer from './modules/scenario.js';
 
 // Normalize SillyTavern language setting so i18n falls back to English
 try {
@@ -85,6 +86,7 @@ try {
 
 // Global STRES object references are tracked via modules/state.js
 let STRESOnboarding;
+let STRESScenario;
 // Narrator Card & Onboarding (Phase 12)
 const STRESNarrator = {
   ctx: null,
@@ -157,6 +159,7 @@ const STRESNarrator = {
   async maybeOnboard() {
     try {
       const meta = this.getMeta();
+      if (!meta) return '';
       if (meta.stres.onboarded) return false;
       await this.sendOnboarding();
       meta.stres.onboarded = Date.now();
@@ -381,9 +384,9 @@ try { window.STRESWorld = STRESWorld; } catch {}
 // Budgeting utilities
 const STRESBudget = {
   profiles: {
-    Lean:   { contextTarget: 1400, cushion: 120, reserve: 150, header: 90, primer: 350 },
-    Balanced:{ contextTarget: 2000, cushion: 200, reserve: 200, header: 120, primer: 600 },
-    Rich:   { contextTarget: 3000, cushion: 300, reserve: 200, header: 140, primer: 800 },
+    Lean:   { contextTarget: 1400, cushion: 120, reserve: 150, header: 90, primer: 350, hud: 140 },
+    Balanced:{ contextTarget: 2000, cushion: 200, reserve: 200, header: 120, primer: 600, hud: 200 },
+    Rich:   { contextTarget: 3000, cushion: 300, reserve: 200, header: 140, primer: 800, hud: 260 },
   },
 
   getSettings() {
@@ -404,13 +407,16 @@ const STRESBudget = {
     s.budget.components.primer = s.budget.components.primer || {};
     s.budget.components.header.maxTokens = prof.header;
     s.budget.components.primer.maxTokens = prof.primer;
+    s.budget.components.hud = s.budget.components.hud || {};
+    if (prof.hud) s.budget.components.hud.maxTokens = prof.hud;
+    if (s.budget.components.hud.enabled === undefined) s.budget.components.hud.enabled = true;
     try { const ctx = window.SillyTavern?.getContext?.(); (ctx?.saveSettingsDebounced || window.saveSettingsDebounced)?.(); } catch {}
     return true;
   },
 
   async predictTokens() {
     const s = this.getSettings();
-    const out = { header: 0, primer: 0, summaries: 0, rag: 0, npc: 0, combat: 0, guard: 0 };
+    const out = { guard: 0, header: 0, primer: 0, summaries: 0, rag: 0, npc: 0, hud: 0, combat: 0 };
     // header
     try { out.header = await STRESWorld.tokenCount(STRESWorld.formatHeader()); } catch {}
     // primer (from cached manifest if available)
@@ -431,6 +437,16 @@ const STRESBudget = {
       const g = STRESGuard.formatGuard?.();
       if (g) out.guard = await STRESWorld.tokenCount(g);
     } catch {}
+    // npc personas (aggregate)
+    try {
+      const npcBundle = await STRESNPC.buildBudgetPreview?.();
+      if (npcBundle) out.npc = await STRESWorld.tokenCount(npcBundle);
+    } catch {}
+    // hud snapshot
+    try {
+      const hud = STRESHud.formatHud?.();
+      if (hud) out.hud = await STRESWorld.tokenCount(hud);
+    } catch {}
     // others are 0 until implemented
     return out;
   },
@@ -444,6 +460,7 @@ const STRESBudget = {
     const entries = [
       { name: 'guard', tokens: Math.min(pred.guard || 0, comps.guard?.maxTokens || 0), enabled: !!(comps.guard?.enabled), sticky: !!(comps.guard?.sticky) },
       { name: 'header', tokens: Math.min(pred.header || 0, comps.header?.maxTokens || 0), enabled: !!(comps.header?.enabled), sticky: !!(comps.header?.sticky) },
+      { name: 'hud', tokens: Math.min(pred.hud || 0, comps.hud?.maxTokens || 0), enabled: !!(comps.hud?.enabled), sticky: !!(comps.hud?.sticky) },
       { name: 'combat', tokens: Math.min(pred.combat || 0, comps.combat?.maxTokens || 0), enabled: !!(comps.combat?.enabled), sticky: !!(comps.combat?.sticky) },
       { name: 'primer', tokens: Math.min(pred.primer || 0, comps.primer?.maxTokens || 0), enabled: !!(comps.primer?.enabled), sticky: !!(comps.primer?.sticky) },
       { name: 'summaries', tokens: Math.min(pred.summaries || 0, comps.summaries?.maxTokens || 0), enabled: !!(comps.summaries?.enabled), sticky: !!(comps.summaries?.sticky) },
@@ -464,7 +481,7 @@ const STRESBudget = {
     }
     let remaining = Math.max(0, limit - total);
     // Degrade order for optional
-    const order = Array.isArray(s.degrade?.order) ? s.degrade.order : ['rag','npc','summaries','primer'];
+    const order = Array.isArray(s.degrade?.order) ? s.degrade.order : ['rag','npc','summaries','primer','hud','header','combat'];
     for (const name of order) {
       const e = entries.find(x => x.name === name);
       if (!e || !e.enabled || e.sticky) continue;
@@ -609,9 +626,15 @@ const STRESRAG = {
 // NPC presence, memory, and injection
 const STRESNPC = {
   ctx: null,
+  T: null,
+  R: null,
   registry: null, // { id -> { id, name, label, role, persona, tags[] } }
+  lastInjectedKeys: new Set(),
   init(ctx) {
     this.ctx = ctx || window.SillyTavern?.getContext?.() || null;
+    this.T = this.ctx?.extension_prompt_types || window.extension_prompt_types || { IN_PROMPT: 0, IN_CHAT: 1, BEFORE_PROMPT: 2 };
+    this.R = this.ctx?.extension_prompt_roles || window.extension_prompt_roles || { SYSTEM: 0, USER: 1, ASSISTANT: 2 };
+    this.lastInjectedKeys = new Set();
     this.ensureRegistry().catch(()=>{});
     try {
       const es = this.ctx?.eventSource; const ET = this.ctx?.eventTypes || {};
@@ -619,7 +642,7 @@ const STRESNPC = {
         es.on(ET.MESSAGE_SENT, (m)=>{ this.onMessage(m).catch(()=>{}); });
         es.on(ET.MESSAGE_RECEIVED, (m)=>{ this.onMessage(m).catch(()=>{}); });
         es.on(ET.GENERATION_ENDED, ()=>{ this.onTurnEnd().catch(()=>{}); });
-        es.on(ET.CHAT_CHANGED, ()=>{ this.registry=null; });
+        es.on(ET.CHAT_CHANGED, ()=>{ this.registry=null; this.lastInjectedKeys = new Set(); });
       }
     } catch {}
   },
@@ -738,30 +761,53 @@ const STRESNPC = {
       if (!this.getSettings()?.inject) return false;
       const ctx = this.ctx || window.SillyTavern?.getContext?.();
       if (!ctx?.setExtensionPrompt) return false;
-      const reg = await this.ensureRegistry();
-      const meta = this.getMeta();
-      const ids = this.listPresent();
-      if (!ids.length) { ctx.setExtensionPrompt('STRES_NPC_CTX', '', ctx.extension_prompt_types.IN_CHAT, 1, false, ctx.extension_prompt_roles.SYSTEM); return false; }
-      // build block
-      const blocks = [];
-      for (const id of ids) {
-        const npc = reg[id] || { id, name: id };
-        const summary = (meta.stres.npc.summaries[id]||[]).slice(-1)[0]?.text || '';
-        const lastFacts = (meta.stres.npc.facts[id]||[]).slice(-2).map(f=>`- ${f.text}`).join('\n');
-        const persona = npc.persona ? `Persona: ${npc.persona}` : '';
-        const b = [`NPC: ${npc.name}${npc.role?` — ${npc.role}`:''}`, persona, (summary?`Last summary: ${summary}`:''), (lastFacts?`Recent: \n${lastFacts}`:'')].filter(Boolean).join('\n');
-        blocks.push(b);
+      const chunks = await this.buildPromptChunks();
+      // Ensure stale entries are cleared before injecting new content
+      const activeKeys = new Set(chunks.map((chunk) => chunk.key));
+      for (const key of Array.from(this.lastInjectedKeys)) {
+        if (!activeKeys.has(key)) {
+          ctx.setExtensionPrompt(key, '', this.T.IN_CHAT, 1, false, this.R.SYSTEM);
+          this.lastInjectedKeys.delete(key);
+        }
       }
-      let text = blocks.join('\n\n');
-      // Budgeting
+      if (!chunks.length) return false;
+
+      const combined = chunks.map((chunk) => chunk.text).join('\n\n');
       const pred = await STRESBudget.predictTokens();
-      pred.npc = await STRESWorld.tokenCount(text);
+      pred.npc = await STRESWorld.tokenCount(combined);
       const decision = STRESBudget.decideAllowance(pred);
-      const allowed = decision.allowance?.npc || 0;
-      if (allowed <= 0) return false;
-      text = STRESBudget.trimToTokens(text, allowed);
-      ctx.setExtensionPrompt('STRES_NPC_CTX', text, ctx.extension_prompt_types.IN_CHAT, 1, false, ctx.extension_prompt_roles.SYSTEM);
-      try { await STRESTelemetry.recordComponent('NPC', text, { key:'STRES_NPC_CTX', pos:'IN_CHAT', count: ids.length }); } catch {}
+      let remaining = decision.allowance?.npc || 0;
+      if (remaining <= 0) {
+        for (const chunk of chunks) {
+          ctx.setExtensionPrompt(chunk.key, '', this.T.IN_CHAT, 1, false, this.R.SYSTEM);
+        }
+        this.lastInjectedKeys.clear();
+        return false;
+      }
+
+      // Inject each NPC prompt respecting the shared allowance
+      for (const chunk of chunks) {
+        const estTokens = await STRESWorld.tokenCount(chunk.text);
+        const allowed = Math.min(remaining, estTokens);
+        if (allowed <= 0) {
+          ctx.setExtensionPrompt(chunk.key, '', this.T.IN_CHAT, 1, false, this.R.SYSTEM);
+          continue;
+        }
+        const trimmed = STRESBudget.trimToTokens(chunk.text, allowed);
+        const filter = () => {
+          try {
+            const meta = this.getMeta();
+            const pres = meta?.stres?.npc?.presence?.[chunk.id];
+            const mode = meta?.stres?.mode || 'story';
+            if (mode === 'ooc') return false;
+            return !!(pres?.inScene || ((Date.now() - (pres?.lastMention || 0)) < 5 * 60 * 1000));
+          } catch { return true; }
+        };
+        ctx.setExtensionPrompt(chunk.key, trimmed, this.T.IN_CHAT, chunk.depth, false, this.R.SYSTEM, filter);
+        this.lastInjectedKeys.add(chunk.key);
+        remaining -= allowed;
+        try { await STRESTelemetry.recordComponent('NPC', trimmed, { key: chunk.key, pos:'IN_CHAT', id: chunk.id }); } catch {}
+      }
       return true;
     } catch { return false; }
   },
@@ -781,7 +827,228 @@ const STRESNPC = {
     (this.ctx?.saveMetadata?.());
   },
 
+  applyScenarioActivation(activation) {
+    try {
+      if (!activation || !Array.isArray(activation.npcPlacements)) return;
+      for (const npc of activation.npcPlacements) {
+        const id = npc?.templateId || npc?.id;
+        if (!id) continue;
+        if ((npc.spawnState || 'active') === 'active') {
+          this.markEnter(id);
+        } else {
+          this.markLeave(id);
+        }
+      }
+      this.injectInPrompt().catch(()=>{});
+    } catch (error) {
+      console.warn('[STRES] NPC scenario activation failed', error);
+    }
+  },
+
+  sanitizeId(id) {
+    return String(id || 'npc').replace(/[^a-zA-Z0-9_]/g, '_');
+  },
+
+  buildFilterDepth(id) {
+    // Reserve depth 1 for NPC context, deeper layers for future variants
+    return 1;
+  },
+
+  async buildPromptChunks() {
+    const ctx = this.ctx || window.SillyTavern?.getContext?.();
+    if (!ctx) return [];
+    const reg = await this.ensureRegistry();
+    const meta = this.getMeta();
+    const ids = this.listPresent();
+    const chunks = [];
+    for (const id of ids) {
+      const npc = reg[id] || { id, name: id };
+      const summary = (meta.stres.npc.summaries[id] || []).slice(-1)[0]?.text || '';
+      const lastFacts = (meta.stres.npc.facts[id] || []).slice(-2).map((f) => `- ${f.text}`).join('\n');
+      const persona = npc.persona ? `Persona: ${npc.persona}` : '';
+      const base = [`NPC: ${npc.name}${npc.role ? ` — ${npc.role}` : ''}`, persona];
+      if (summary) base.push(`Last summary: ${summary}`);
+      if (lastFacts) base.push(`Recent:\n${lastFacts}`);
+      const text = base.filter(Boolean).join('\n');
+      if (!text) continue;
+      const safeId = this.sanitizeId(id);
+      chunks.push({
+        id,
+        key: `STRES_NPC_${safeId.toUpperCase()}`,
+        text,
+        depth: this.buildFilterDepth(id),
+      });
+    }
+    return chunks;
+  },
+
+  async buildBudgetPreview() {
+    try {
+      const chunks = await this.buildPromptChunks();
+      if (!chunks.length) return '';
+      return chunks.map((chunk) => chunk.text).join('\n\n');
+    } catch { return ''; }
+  },
+
   escapeReg(s) { return String(s||'').replace(/[.*+?^${}()|[\]\\]/g, '\\$&'); }
+};
+
+// Player HUD snapshot (Phase 4 foundation)
+const STRESHud = {
+  ctx: null,
+  T: null,
+  R: null,
+  init(ctx) {
+    this.ctx = ctx || window.SillyTavern?.getContext?.() || null;
+    this.T = this.ctx?.extension_prompt_types || window.extension_prompt_types || { IN_PROMPT: 0, IN_CHAT: 1, BEFORE_PROMPT: 2 };
+    this.R = this.ctx?.extension_prompt_roles || window.extension_prompt_roles || { SYSTEM: 0, USER: 1, ASSISTANT: 2 };
+    try {
+      const es = this.ctx?.eventSource; const ET = this.ctx?.eventTypes || {};
+      if (es && ET) {
+        const refresh = () => this.refreshHudInPrompt().catch(()=>{});
+        es.on(ET.MESSAGE_SENT, refresh);
+        es.on(ET.MESSAGE_RECEIVED, refresh);
+        es.on(ET.GENERATION_ENDED, refresh);
+        es.on(ET.CHAT_CHANGED, () => { refresh(); });
+      }
+    } catch {}
+  },
+
+  getSettings() {
+    const s = window.extension_settings?.[extensionName] || {};
+    return s.ui || defaultSettings.ui;
+  },
+
+  getMeta() {
+    const ctx = this.ctx || window.SillyTavern?.getContext?.();
+    if (!ctx) return null;
+    const meta = ctx.chatMetadata || (ctx.chatMetadata = {});
+    meta.stres = meta.stres || {};
+    if (!meta.stres.hud) meta.stres.hud = { fields: [], lastUpdate: null };
+    return meta;
+  },
+
+  applyScenarioActivation(activation) {
+    try {
+      if (!activation) return;
+      const meta = this.getMeta();
+      if (!meta) return;
+      const hud = meta.stres.hud || (meta.stres.hud = { fields: [], lastUpdate: null });
+      if (Array.isArray(activation.hudOverrides) && activation.hudOverrides.length) {
+        hud.fields = activation.hudOverrides.map((entry) => ({
+          key: entry.key || entry.id || entry.label || 'stat',
+          label: entry.label || entry.name || entry.key || entry.id || 'Stat',
+          value: entry.value != null ? String(entry.value) : '',
+        }));
+        hud.lastUpdate = Date.now();
+      }
+      if (activation.metadata?.hud?.fields) {
+        const extra = activation.metadata.hud.fields;
+        if (Array.isArray(extra)) {
+          hud.fields = extra.map((entry) => ({
+            key: entry.key || entry.id || entry.label || 'stat',
+            label: entry.label || entry.name || entry.key || entry.id || 'Stat',
+            value: entry.value != null ? String(entry.value) : '',
+          }));
+          hud.lastUpdate = Date.now();
+        }
+      }
+      (this.ctx?.saveMetadata?.());
+      this.refreshHudInPrompt().catch(()=>{});
+    } catch {}
+  },
+
+  updateField(key, value, label) {
+    try {
+      const meta = this.getMeta();
+      if (!meta) return false;
+      const hud = meta.stres.hud || (meta.stres.hud = { fields: [], lastUpdate: null });
+      const safeKey = String(key || '').trim();
+      if (!safeKey) return false;
+      const fields = Array.isArray(hud.fields) ? hud.fields : (hud.fields = []);
+      const existing = fields.find((f) => f.key === safeKey);
+      if (existing) {
+        if (label) existing.label = label;
+        existing.value = value;
+      } else {
+        fields.push({ key: safeKey, label: label || safeKey, value });
+      }
+      hud.lastUpdate = Date.now();
+      (this.ctx?.saveMetadata?.());
+      this.refreshHudInPrompt().catch(()=>{});
+      return true;
+    } catch { return false; }
+  },
+
+  formatHud() {
+    try {
+      const cfg = this.getSettings();
+      if (!cfg?.showHUD) return '';
+      const meta = this.getMeta();
+      const hud = meta?.stres?.hud;
+      if (!hud || hud.suspend) return '';
+      const lines = [];
+      const fields = Array.isArray(hud.fields) ? hud.fields : [];
+      if (fields.length) {
+        lines.push('Player Sheet');
+        for (const field of fields) {
+          const label = field.label || field.key || 'Stat';
+          const value = field.value != null && String(field.value).trim() !== '' ? field.value : '—';
+          lines.push(`- ${label}: ${value}`);
+        }
+      }
+      const state = meta?.stres?.state || {};
+      if (Array.isArray(state.objectives) && state.objectives.length) {
+        lines.push('Objectives:');
+        for (const objective of state.objectives.slice(0, 4)) {
+          lines.push(`• ${objective}`);
+        }
+      }
+      if (!lines.length) return '';
+      return lines.join('\n');
+    } catch { return ''; }
+  },
+
+  buildFilter() {
+    return () => {
+      try {
+        const meta = this.getMeta();
+        if (!meta) return true;
+        const mode = meta?.stres?.mode || 'story';
+        if (mode === 'ooc') return false;
+        return true;
+      } catch { return true; }
+    };
+  },
+
+  async refreshHudInPrompt() {
+    try {
+      const ctx = this.ctx || window.SillyTavern?.getContext?.();
+      if (!ctx?.setExtensionPrompt) return false;
+      const cfg = this.getSettings();
+      if (!cfg?.showHUD) {
+        ctx.setExtensionPrompt('STRES_PLAYER_HUD', '', this.T.IN_CHAT, 0, false, this.R.USER);
+        return false;
+      }
+      const text0 = this.formatHud();
+      if (!text0) {
+        ctx.setExtensionPrompt('STRES_PLAYER_HUD', '', this.T.IN_CHAT, 0, false, this.R.USER);
+        return false;
+      }
+      const pred = await STRESBudget.predictTokens();
+      pred.hud = await STRESWorld.tokenCount(text0);
+      const decision = STRESBudget.decideAllowance(pred);
+      const allowed = decision.allowance?.hud || 0;
+      if (allowed <= 0) {
+        ctx.setExtensionPrompt('STRES_PLAYER_HUD', '', this.T.IN_CHAT, 0, false, this.R.USER);
+        return false;
+      }
+      const text = STRESBudget.trimToTokens(text0, allowed);
+      ctx.setExtensionPrompt('STRES_PLAYER_HUD', text, this.T.IN_CHAT, 0, false, this.R.USER, this.buildFilter());
+      try { await STRESTelemetry.recordComponent('HUD', text, { key: 'STRES_PLAYER_HUD', pos: 'IN_CHAT' }); } catch {}
+      return true;
+    } catch { return false; }
+  }
 };
 
 // Combat mode, header, dice, and model switching (Phase 7)
@@ -963,15 +1230,22 @@ const STRESGuard = {
       const ctx = this.ctx || window.SillyTavern?.getContext?.();
       if (!ctx?.setExtensionPrompt) return false;
       const text0 = this.formatGuard();
-      if (!text0) { ctx.setExtensionPrompt('STRES_GUARDRAIL', '', this.T.IN_CHAT, 0, false, this.R.SYSTEM); return false; }
+      if (!text0) { ctx.setExtensionPrompt('STRES_GUARD', '', this.T.IN_CHAT, 0, false, this.R.SYSTEM); return false; }
       const pred = await STRESBudget.predictTokens();
       pred.guard = await STRESWorld.tokenCount(text0);
       const decision = STRESBudget.decideAllowance(pred);
       const allowed = decision.allowance?.guard || 0;
-      if (allowed <= 0) { ctx.setExtensionPrompt('STRES_GUARDRAIL', '', this.T.IN_CHAT, 0, false, this.R.SYSTEM); return false; }
+      if (allowed <= 0) { ctx.setExtensionPrompt('STRES_GUARD', '', this.T.IN_CHAT, 0, false, this.R.SYSTEM); return false; }
       const text = STRESBudget.trimToTokens(text0, allowed);
-      ctx.setExtensionPrompt('STRES_GUARDRAIL', text, this.T.IN_CHAT, 0, false, this.R.SYSTEM);
-      try { await STRESTelemetry.recordComponent('Guard', text, { key:'STRES_GUARDRAIL', pos:'IN_CHAT' }); } catch {}
+      const filter = () => {
+        try {
+          const meta = this.ctx?.chatMetadata || window.SillyTavern?.getContext?.()?.chatMetadata;
+          const mode = meta?.stres?.mode || 'story';
+          return mode !== 'ooc';
+        } catch { return true; }
+      };
+      ctx.setExtensionPrompt('STRES_GUARD', text, this.T.IN_CHAT, 0, false, this.R.SYSTEM, filter);
+      try { await STRESTelemetry.recordComponent('Guard', text, { key:'STRES_GUARD', pos:'IN_CHAT' }); } catch {}
       return true;
     } catch { return false; }
   }
@@ -1360,6 +1634,9 @@ const STRESSummary = {
       const res = await ctx.generateQuietPrompt({ quietPrompt: prompt });
       const text = String(res || '').trim();
       if (!text) return false;
+      this.T = this.T || ctx?.extension_prompt_types || window.extension_prompt_types || { IN_PROMPT: 0, IN_CHAT: 1, BEFORE_PROMPT: 2 };
+      this.R = this.R || ctx?.extension_prompt_roles || window.extension_prompt_roles || { SYSTEM: 0, USER: 1, ASSISTANT: 2 };
+
       const meta = ctx.chatMetadata || (ctx.chatMetadata = {});
       meta.stres = meta.stres || {};
       const arr = Array.isArray(meta.stres.summaries) ? meta.stres.summaries : [];
@@ -1408,15 +1685,25 @@ const STRESPrompts = {
     } catch {}
     this.registerMacros();
     // Initial scene header injection
-    this.refreshSceneHeaderInPrompt().catch(()=>{});
+    (async ()=>{
+      await STRESGuard.refreshGuardrailInPrompt?.();
+      await this.refreshSceneHeaderInPrompt();
+      await STRESHud.refreshHudInPrompt?.();
+      await STRESNPC.injectInPrompt?.();
+      await this.injectRAGInPrompt();
+    })().catch(()=>{});
     // Wire events if available
     try {
       const es = this.ctx?.eventSource; const ET = this.ctx?.eventTypes || {};
       if (es && ET) {
         const refresh = () => {
-          this.refreshSceneHeaderInPrompt().catch(()=>{});
-          this.injectRAGInPrompt().catch(()=>{});
-          try { STRESGuard.refreshGuardrailInPrompt(); } catch {}
+          (async () => {
+            await STRESGuard.refreshGuardrailInPrompt?.();
+            await this.refreshSceneHeaderInPrompt();
+            await STRESHud.refreshHudInPrompt?.();
+            await STRESNPC.injectInPrompt?.();
+            await this.injectRAGInPrompt();
+          })().catch(()=>{});
         };
         es.on(ET.MESSAGE_SENT, refresh);
         es.on(ET.MESSAGE_RECEIVED, refresh);
@@ -1424,7 +1711,15 @@ const STRESPrompts = {
         es.on(ET.CHAT_CHANGED, refresh);
       } else {
         // Fallback: periodic refresh to keep it up-to-date
-        setInterval(()=>{ this.refreshSceneHeaderInPrompt().catch(()=>{}); this.injectRAGInPrompt().catch(()=>{}); try { STRESGuard.refreshGuardrailInPrompt(); } catch {} }, 6000);
+        setInterval(()=>{
+          (async () => {
+            await STRESGuard.refreshGuardrailInPrompt?.();
+            await this.refreshSceneHeaderInPrompt();
+            await STRESHud.refreshHudInPrompt?.();
+            await STRESNPC.injectInPrompt?.();
+            await this.injectRAGInPrompt();
+          })().catch(()=>{});
+        }, 6000);
       }
     } catch {}
   },
@@ -1446,6 +1741,77 @@ const STRESPrompts = {
     } catch {}
   },
 
+  async applyScenarioActivation(activation) {
+    const result = { primerApplied: false, headerApplied: false };
+    try {
+      if (!activation) return result;
+      const ctx = this.ctx || window.SillyTavern?.getContext?.();
+      if (!ctx) return result;
+
+      const meta = ctx.chatMetadata || (ctx.chatMetadata = {});
+      meta.stres = meta.stres || {};
+      meta.stres.latestScenario = meta.stres.latestScenario || {};
+      Object.assign(meta.stres.latestScenario, activation, { appliedAt: new Date().toISOString() });
+
+      const settings = window.extension_settings?.[extensionName];
+      if (settings) {
+        settings.world = settings.world || structuredClone(defaultSettings.world);
+        settings.world.header = settings.world.header || structuredClone(defaultSettings.world.header);
+        if (activation.sceneHeader?.template) {
+          settings.world.header.template = activation.sceneHeader.template;
+        }
+        if (activation.sceneHeader?.metadata?.locationName) {
+          settings.world.locationName = activation.sceneHeader.metadata.locationName;
+        }
+        if (activation.sceneHeader?.metadata?.regionId) {
+          settings.world.regionId = activation.sceneHeader.metadata.regionId;
+        }
+      if (activation.sceneHeader?.metadata?.locationType) {
+        settings.world.locationType = activation.sceneHeader.metadata.locationType;
+      }
+      if (activation.campaign?.timelineTag) {
+        settings.timelineTag = activation.campaign.timelineTag;
+      }
+        if (activation.campaign?.id) {
+          settings.campaignId = activation.campaign.id;
+        }
+        try { (ctx?.saveSettingsDebounced || window.saveSettingsDebounced)?.(); } catch {}
+      }
+
+      if (activation.primer?.text) {
+        const roleKey = (() => {
+          switch ((activation.primer.role || 'system').toLowerCase()) {
+            case 'user': return this.R.USER ?? 1;
+            case 'assistant': return this.R.ASSISTANT ?? 2;
+            default: return this.R.SYSTEM ?? 0;
+          }
+        })();
+        const depth = Number.isFinite(activation.primer.depth) ? Number(activation.primer.depth) : 0;
+        const pred = await STRESBudget.predictTokens();
+        const tokenEstimate = await STRESWorld.tokenCount(activation.primer.text);
+        pred.primer = tokenEstimate;
+        const decision = STRESBudget.decideAllowance(pred);
+        const allowed = decision.allowance?.primer ?? tokenEstimate;
+        if (allowed > 0) {
+          const trimmed = STRESBudget.trimToTokens(activation.primer.text, allowed);
+          ctx.setExtensionPrompt(activation.primer.promptId || 'STRES_WORLD_PRIMER', trimmed, this.T.BEFORE_PROMPT, depth, false, roleKey);
+          try { await STRESTelemetry.recordComponent('Primer', trimmed, { key: activation.primer.promptId || 'STRES_WORLD_PRIMER', source: 'scenario' }); } catch {}
+          meta.stres.primerInjectedAt = Date.now();
+          result.primerApplied = true;
+        }
+      }
+
+      result.headerApplied = await this.refreshSceneHeaderInPrompt();
+      try { await STRESHud.applyScenarioActivation?.(activation); } catch {}
+
+      await ctx.saveMetadata?.();
+      return result;
+    } catch (error) {
+      console.error('[STRES] Scenario activation prompt wiring failed', error);
+      return result;
+    }
+  },
+
   async injectPrimerInPrompt(force=false) {
     try {
       const ctx = this.ctx || window.SillyTavern?.getContext?.();
@@ -1464,7 +1830,14 @@ const STRESPrompts = {
       const allowed = decision.allowance?.primer || 0;
       if (allowed <= 0) return false;
       const text = STRESBudget.trimToTokens(primer, allowed);
-      ctx.setExtensionPrompt('STRES_WORLD_PRIMER', text, this.T.BEFORE_PROMPT, 0, false, this.R.SYSTEM);
+      const filter = () => {
+        try {
+          const meta = ctx?.chatMetadata || {};
+          const mode = meta?.stres?.mode || 'story';
+          return mode !== 'ooc';
+        } catch { return true; }
+      };
+      ctx.setExtensionPrompt('STRES_WORLD_PRIMER', text, this.T.BEFORE_PROMPT, 0, false, this.R.SYSTEM, filter);
       try { await STRESTelemetry.recordComponent('Primer', text, { key:'STRES_WORLD_PRIMER', pos:'BEFORE_PROMPT' }); } catch {}
       // Persist flag in chat metadata
       try {
@@ -1492,7 +1865,14 @@ const STRESPrompts = {
       const allowed = decision.allowance?.header || 0;
       if (allowed <= 0) return false;
       const text = STRESBudget.trimToTokens(header, allowed);
-      ctx.setExtensionPrompt('STRES_SCENE_HEADER', text, this.T.IN_CHAT, 0, false, this.R.SYSTEM);
+      const filter = () => {
+        try {
+          const meta = ctx?.chatMetadata || {};
+          const mode = meta?.stres?.mode || 'story';
+          return mode !== 'ooc';
+        } catch { return true; }
+      };
+      ctx.setExtensionPrompt('STRES_SCENE_HEADER', text, this.T.IN_CHAT, 0, false, this.R.SYSTEM, filter);
       try { await STRESTelemetry.recordComponent('Header', text, { key:'STRES_SCENE_HEADER', pos:'IN_CHAT' }); } catch {}
       // Save to chat metadata for visibility and future tools
       try {
@@ -1527,7 +1907,14 @@ const STRESPrompts = {
       const allowed = decision.allowance?.summaries || 0;
       if (allowed <= 0) return false;
       const text = STRESBudget.trimToTokens(last, allowed);
-      ctx.setExtensionPrompt('STRES_ROLLING_SUMMARY', text, this.T.BEFORE_PROMPT, 0, false, this.R.SYSTEM);
+      const filter = () => {
+        try {
+          const meta = ctx?.chatMetadata || {};
+          const mode = meta?.stres?.mode || 'story';
+          return mode !== 'ooc';
+        } catch { return true; }
+      };
+      ctx.setExtensionPrompt('STRES_ROLLING_SUMMARY', text, this.T.BEFORE_PROMPT, 0, false, this.R.SYSTEM, filter);
       try { await STRESTelemetry.recordComponent('Summary', text, { key:'STRES_ROLLING_SUMMARY', pos:'BEFORE_PROMPT' }); } catch {}
       return true;
     } catch { return false; }
@@ -1554,7 +1941,14 @@ const STRESPrompts = {
       text = STRESBudget.trimToTokens(text, allowed);
       const position = (s.rag?.position === 'in_chat') ? this.T.IN_CHAT : this.T.IN_PROMPT;
       const depth = Number.isFinite(Number(s.rag?.depth)) ? Number(s.rag.depth) : 0;
-      ctx.setExtensionPrompt('STRES_RAG_HINTS', text, position, depth, false, this.R.SYSTEM);
+      const filter = () => {
+        try {
+          const meta = ctx?.chatMetadata || {};
+          const mode = meta?.stres?.mode || 'story';
+          return mode !== 'ooc';
+        } catch { return true; }
+      };
+      ctx.setExtensionPrompt('STRES_RAG_HINTS', text, position, depth, false, this.R.SYSTEM, filter);
       try { STRESTelemetry.logRAG(query, items, allowed); await STRESTelemetry.recordComponent('RAG', text, { key:'STRES_RAG_HINTS', pos: (position===this.T.IN_CHAT?'IN_CHAT':'IN_PROMPT') }); } catch {}
       // Save to metadata
       try {
@@ -1689,6 +2083,12 @@ const STRESChat = {
           if (sub === 'refresh') { (async()=>{ await STRESOnboarding.refresh(); })(); return ''; }
           if (sub === 'wizard') { (async()=>{ await STRESOnboarding.wizard(); })(); return ''; }
           if (sub === 'script') { (async()=>{ await STRESOnboarding.showScriptSummary(); })(); return ''; }
+          if (sub === 'undo') { (async()=>{ await STRESOnboarding.undoScenarioCleanup(); })(); return ''; }
+          if (sub === 'apply') {
+            const payloadText = parts.slice(3).join(' ');
+            (async()=>{ await STRESOnboarding.applyScenario(payloadText); })();
+            return '';
+          }
           (async()=>{ await STRESOnboarding.begin(); })();
           return '';
         }
@@ -2448,8 +2848,8 @@ const STRESChat = {
     const lines = [];
     lines.push(`Profile: ${b.profile || 'Custom'}`);
     lines.push(`Context target: ${b.contextTarget}, cushion: ${b.cushion}, reserve: ${b.reserve}`);
-    lines.push(`Predicted tokens — guard:${pred.guard||0}, header:${pred.header||0}, primer:${pred.primer||0}, rag:${pred.rag||0}`);
-    lines.push(`Allowance — guard:${decision.allowance.guard||0}, header:${decision.allowance.header||0}, primer:${decision.allowance.primer||0}, rag:${decision.allowance.rag||0} (limit ${decision.limit}, remaining ${decision.remaining})`);
+    lines.push(`Predicted tokens — guard:${pred.guard||0}, header:${pred.header||0}, hud:${pred.hud||0}, primer:${pred.primer||0}, summaries:${pred.summaries||0}, rag:${pred.rag||0}, npc:${pred.npc||0}, combat:${pred.combat||0}`);
+    lines.push(`Allowance — guard:${decision.allowance.guard||0}, header:${decision.allowance.header||0}, hud:${decision.allowance.hud||0}, primer:${decision.allowance.primer||0}, summaries:${decision.allowance.summaries||0}, rag:${decision.allowance.rag||0}, npc:${decision.allowance.npc||0}, combat:${decision.allowance.combat||0} (limit ${decision.limit}, remaining ${decision.remaining})`);
     this.sendToChat('**Token Budget**\n' + lines.join('\n'));
     return '';
   },
@@ -2681,6 +3081,9 @@ const STRESChat = {
 // Instantiate onboarding module with runtime dependencies
 STRESOnboarding = createOnboarding({ STRESNarrator, STRESChat });
 try { window.STRESOnboarding = STRESOnboarding; } catch {}
+STRESScenario = createScenarioReducer({ STRESWorld });
+try { window.STRESScenario = STRESScenario; } catch {}
+try { state.scenarioReducer = STRESScenario; } catch {}
 
 // Main initialization function
 async function initializeExtension() {
@@ -2754,6 +3157,9 @@ async function initializeExtension() {
   // Initialize NPC presence/memory
   try { STRESNPC.init(context); } catch {}
 
+  // Initialize HUD snapshot injection
+  try { STRESHud.init(context); } catch {}
+
   // Initialize combat mode & header
   try { STRESCombat.init(context); } catch {}
 
@@ -2769,6 +3175,24 @@ async function initializeExtension() {
   // Initialize Narrator & Onboarding
   try { STRESNarrator.init(context); } catch {}
   try { STRESOnboarding.init(context); } catch {}
+  try { STRESScenario.ctx = context; } catch {}
+  try {
+    if (!window.__STRESScenarioListenerAttached) {
+      window.addEventListener('stres:scenarioActivated', (event) => {
+        const activation = event?.detail?.activation;
+        if (!activation) return;
+        (async () => {
+          try { await STRESPrompts.applyScenarioActivation(activation); } catch (error) {
+            console.error('[STRES] Scenario prompt wiring error', error);
+          }
+          try { STRESNPC.applyScenarioActivation?.(activation); } catch (error) {
+            console.error('[STRES] Scenario NPC wiring error', error);
+          }
+        })();
+      });
+      window.__STRESScenarioListenerAttached = true;
+    }
+  } catch {}
 
   // Initialize Setup Wizard listener
   try { STRESSetup.init(context); } catch {}
@@ -2992,6 +3416,36 @@ function initializeUI() {
     const cbPriEn = doc.createElement('input'); cbPriEn.type='checkbox';
     fldPriEn.append(lblPriEn, cbPriEn);
 
+    const fldHudMax = doc.createElement('div'); fldHudMax.className = 'stres-field';
+    const lblHudMax = doc.createElement('label'); lblHudMax.textContent = 'HUD max tokens';
+    const inpHudMax = doc.createElement('input'); inpHudMax.type='number'; inpHudMax.min='40'; inpHudMax.step='10'; inpHudMax.value = (settings.budget?.components?.hud?.maxTokens) ?? 200;
+    inpHudMax.addEventListener('change', (ev)=>{
+      const val = Number(ev.target.value || 0);
+      const store = window.extension_settings?.[extensionName] || settings;
+      store.budget = store.budget || structuredClone(defaultSettings.budget);
+      store.budget.components = store.budget.components || {};
+      store.budget.components.hud = store.budget.components.hud || {};
+      store.budget.components.hud.maxTokens = val;
+      try { const ctx = window.SillyTavern?.getContext?.(); (ctx?.saveSettingsDebounced || window.saveSettingsDebounced)?.(); } catch {}
+      STRESHud.refreshHudInPrompt?.();
+    });
+    fldHudMax.append(lblHudMax, inpHudMax);
+
+    const fldHudEn = doc.createElement('div'); fldHudEn.className = 'stres-field';
+    const lblHudEn = doc.createElement('label'); lblHudEn.textContent = 'Enable HUD Prompt';
+    const cbHudEn = doc.createElement('input'); cbHudEn.type='checkbox'; cbHudEn.checked = !!(settings.budget?.components?.hud?.enabled ?? settings.ui?.showHUD ?? true);
+    cbHudEn.addEventListener('change', (ev)=>{
+      const val = !!ev.target.checked;
+      const store = window.extension_settings?.[extensionName] || settings;
+      store.budget = store.budget || structuredClone(defaultSettings.budget);
+      store.budget.components = store.budget.components || {};
+      store.budget.components.hud = store.budget.components.hud || {};
+      store.budget.components.hud.enabled = val;
+      try { const ctx = window.SillyTavern?.getContext?.(); (ctx?.saveSettingsDebounced || window.saveSettingsDebounced)?.(); } catch {}
+      STRESHud.refreshHudInPrompt?.();
+    });
+    fldHudEn.append(lblHudEn, cbHudEn);
+
     // RAG controls
     const fldRagEn = doc.createElement('div'); fldRagEn.className = 'stres-field';
     const lblRagEn = doc.createElement('label'); lblRagEn.textContent = 'Enable RAG';
@@ -3008,7 +3462,7 @@ function initializeUI() {
     const inpRagMax = doc.createElement('input'); inpRagMax.type='number'; inpRagMax.min='50'; inpRagMax.max='800'; inpRagMax.step='10';
     fldRagMax.append(labRagMax, inpRagMax);
 
-    secBud.append(hBud, fldProf, fldTarget, fldCush, fldRes, fldHdrMax, fldPriMax, fldPriEn, fldRagEn, fldRagTopK, fldRagMax);
+    secBud.append(hBud, fldProf, fldTarget, fldCush, fldRes, fldHdrMax, fldPriMax, fldPriEn, fldHudMax, fldHudEn, fldRagEn, fldRagTopK, fldRagMax);
     content.appendChild(secBud);
 
     // Footer
@@ -3061,6 +3515,8 @@ function initializeUI() {
       inpApi.value = defaultSettings.serverUrl;
       inpCamp.value = '';
       inpChar.value = '';
+      inpHudMax.value = defaultSettings.budget.components.hud.maxTokens;
+      cbHudEn.checked = !!defaultSettings.budget.components.hud.enabled;
       notice.textContent = 'Defaults restored (not saved)';
       notice.dataset.visible = 'true'; setTimeout(()=>{ notice.dataset.visible = 'false'; }, 2500);
     });
@@ -3091,6 +3547,9 @@ function initializeUI() {
       s[extensionName].budget.components.primer = s[extensionName].budget.components.primer || {};
       s[extensionName].budget.components.primer.maxTokens = Number(inpPriMax.value || s[extensionName].budget.components.primer.maxTokens || 600);
       s[extensionName].budget.components.primer.enabled = !!cbPriEn.checked;
+      s[extensionName].budget.components.hud = s[extensionName].budget.components.hud || {};
+      s[extensionName].budget.components.hud.maxTokens = Number(inpHudMax.value || s[extensionName].budget.components.hud.maxTokens || 200);
+      s[extensionName].budget.components.hud.enabled = !!cbHudEn.checked;
       s[extensionName].budget.components.rag = s[extensionName].budget.components.rag || {};
       s[extensionName].budget.components.rag.maxTokens = Number(inpRagMax.value || s[extensionName].budget.components.rag.maxTokens || 300);
       // RAG simple
@@ -3109,6 +3568,7 @@ function initializeUI() {
       // Optional: quick probe
       setTimeout(()=>{ testConnection(url); }, 100);
       try { await STRESPrompts.refreshSceneHeaderInPrompt(); } catch {}
+      try { await STRESHud.refreshHudInPrompt(); } catch {}
     });
 
     footer.appendChild(btnTest);
@@ -3138,6 +3598,10 @@ function initializeUI() {
       inpHdrMax.value = (b.components?.header?.maxTokens) ?? 120;
       inpPriMax.value = (b.components?.primer?.maxTokens) ?? 600;
       cbPriEn.checked = !!(b.components?.primer?.enabled ?? true);
+      inpHudMax.value = (b.components?.hud?.maxTokens) ?? 200;
+      cbHudEn.checked = (b.components?.hud?.enabled !== undefined && b.components?.hud !== null)
+        ? !!b.components.hud.enabled
+        : !!(cur.ui?.showHUD ?? true);
       const r = cur.rag || defaultSettings.rag;
       cbRagEn.checked = !!r.enabled;
       inpRagTopK.value = r.topK ?? 2;
@@ -3197,6 +3661,7 @@ function initializeUI() {
       ['budgets','Budgets'],
       ['primer','Primer'],
       ['header','Header'],
+      ['hud','HUD'],
       ['rag','RAG'],
       ['summaries','Summaries'],
       ['npc','NPC'],
@@ -3228,7 +3693,14 @@ function initializeUI() {
       const region = mkInput('text', get(s,'world.regionId','')); region.addEventListener('change', onChange('world.regionId'));
       const loc = mkInput('text', get(s,'world.locationName','')); loc.addEventListener('change', onChange('world.locationName'));
       const primerOn = mkCheck(get(s,'autoInjection.primer',true)); primerOn.addEventListener('change', onChange('autoInjection.primer'));
-      const hud = mkCheck(get(s,'ui.showHUD',true)); hud.addEventListener('change', onChange('ui.showHUD'));
+      const hud = mkCheck(get(s,'ui.showHUD',true));
+      hud.addEventListener('change', (ev)=>{
+        const val = !!ev.target.checked;
+        set(window.extension_settings[extensionName],'ui.showHUD', val);
+        set(window.extension_settings[extensionName],'budget.components.hud.enabled', val);
+        save();
+        STRESHud.refreshHudInPrompt?.();
+      });
       body.append(
         row('API Base URL', api),
         row('Campaign ID', camp),
@@ -3273,6 +3745,22 @@ function initializeUI() {
       body.append(
         row('Enable Header', enabled),
         row('Header Template', tmpl, 'Placeholders: {location}, {date}, {timeOfDay}, {weather}')
+      );
+    };
+    const buildHud = ()=>{
+      body.innerHTML='';
+      const enabled = mkCheck(get(s,'budget.components.hud.enabled', get(s,'ui.showHUD', true)));
+      enabled.addEventListener('change', (ev)=>{
+        const val = !!ev.target.checked;
+        set(window.extension_settings[extensionName],'budget.components.hud.enabled', val);
+        save();
+        STRESHud.refreshHudInPrompt?.();
+      });
+      const maxT = mkInput('number', get(s,'budget.components.hud.maxTokens',200), { min:40, step:10 });
+      maxT.addEventListener('change', onChange('budget.components.hud.maxTokens', Number, ()=>STRESHud.refreshHudInPrompt()));
+      body.append(
+        row('Enable HUD Prompt', enabled, 'Allow STRES to inject player stats into the chat prompt'),
+        row('HUD max tokens', maxT)
       );
     };
     const buildRag = ()=>{
@@ -3384,7 +3872,7 @@ function initializeUI() {
     };
 
     // Tab switcher
-    const mapping = { general: buildGeneral, budgets: buildBudgets, primer: buildPrimer, header: buildHeader, rag: buildRag, summaries: buildSummaries, npc: buildNPC, combat: buildCombat, tools: buildTools, advanced: buildAdvanced };
+    const mapping = { general: buildGeneral, budgets: buildBudgets, primer: buildPrimer, header: buildHeader, hud: buildHud, rag: buildRag, summaries: buildSummaries, npc: buildNPC, combat: buildCombat, tools: buildTools, advanced: buildAdvanced };
     let active = 'general';
     const selectTab = (id)=>{ active = id; btns.forEach(b=>{ b.classList.toggle('active', b.dataset.tab===id); }); (mapping[id]||buildGeneral)(); };
     btns.forEach(b=> b.addEventListener('click', ()=> selectTab(b.dataset.tab)));

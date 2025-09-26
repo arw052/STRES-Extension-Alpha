@@ -1,5 +1,6 @@
 import { defaultSettings, extensionName } from './constants.js';
 import STRESWorld from './world.js';
+import { state } from './state.js';
 
 export function createOnboarding({ STRESNarrator, STRESChat }) {
   const module = {
@@ -9,6 +10,50 @@ export function createOnboarding({ STRESNarrator, STRESChat }) {
     init(ctx) {
       this.ctx = ctx || window.SillyTavern?.getContext?.() || null;
       this.ensureSeeded().catch(() => {});
+    },
+    tryParseJson(text) {
+      if (!text) return null;
+      const candidate = String(text);
+      try { return JSON.parse(candidate); } catch {}
+      return null;
+    },
+    parseArchitectJson(raw) {
+      if (!raw) return null;
+      let text = String(raw).trim();
+      if (!text) return null;
+      const codeMatch = text.match(/```(?:json)?\s*([\s\S]*?)```/i);
+      if (codeMatch) {
+        text = codeMatch[1].trim();
+      }
+      const braceStart = text.indexOf('{');
+      const braceEnd = text.lastIndexOf('}');
+      if (braceStart >= 0 && braceEnd > braceStart) {
+        const sliced = text.slice(braceStart, braceEnd + 1);
+        const parsed = this.tryParseJson(sliced);
+        if (parsed) return parsed;
+      }
+      return this.tryParseJson(text);
+    },
+    isArchitectShape(obj) {
+      if (!obj || typeof obj !== 'object') return false;
+      return !!(obj.scenarioId || obj.worldpackId || obj.worldPackId || obj.campaignLabel || (Array.isArray(obj.playerCharacters) && obj.playerCharacters.length));
+    },
+    findRecentArchitectPayload(limit = 40) {
+      const ctx = this.getContext();
+      const chat = Array.isArray(ctx?.chat) ? ctx.chat : [];
+      const result = { payload: null, raw: null, source: null };
+      for (let i = chat.length - 1, searched = 0; i >= 0 && searched < limit; i--, searched++) {
+        const message = chat[i];
+        if (!message || !message.mes) continue;
+        const parsed = this.parseArchitectJson(message.mes);
+        if (parsed && this.isArchitectShape(parsed)) {
+          result.payload = parsed;
+          result.raw = message.mes;
+          result.source = `chat:${i}`;
+          return result;
+        }
+      }
+      return null;
     },
     getContext() {
       this.ctx = this.ctx || window.SillyTavern?.getContext?.() || null;
@@ -308,6 +353,7 @@ export function createOnboarding({ STRESNarrator, STRESChat }) {
       lines.push('1) Review detected data.');
       lines.push('2) Use `/stres begin wizard` to generate a questionnaire prompt (or follow your worldpack-specific instructions).');
       lines.push('3) Use `/stres begin status` anytime to review this snapshot.');
+      lines.push('4) After the architect returns JSON, run `/stres begin apply last` to activate the chosen scenario.');
 
       STRESChat.sendToChat(lines.join('\n'));
       return { ok: true, info };
@@ -341,6 +387,11 @@ export function createOnboarding({ STRESNarrator, STRESChat }) {
         version: script.version || '1.0',
         modelHint: script.modelHint || null,
       };
+      try {
+        const ctx = this.getContext();
+        meta.onboarding.wizardStartIndex = Array.isArray(ctx?.chat) ? ctx.chat.length : 0;
+        meta.onboarding.wizardStartedAt = new Date().toISOString();
+      } catch {}
       await this.saveMetadata();
       const message = this.buildWizardPrompt(info, script);
       STRESChat.sendToChat(message);
@@ -366,6 +417,207 @@ export function createOnboarding({ STRESNarrator, STRESChat }) {
       STRESChat.sendToChat(lines.join('\n'));
       return { ok: true };
     },
+    cloneMessage(message) {
+      try {
+        return structuredClone(message);
+      } catch {
+        return JSON.parse(JSON.stringify(message));
+      }
+    },
+    ensureArchiveBucket(meta) {
+      if (!meta.onboarding) meta.onboarding = {};
+      if (!Array.isArray(meta.onboarding.archivedMessages)) meta.onboarding.archivedMessages = [];
+      return meta.onboarding.archivedMessages;
+    },
+    async performCleanup(cleanup, meta, activation) {
+      const info = { archivedCount: 0, pruned: false };
+      const cfg = cleanup && typeof cleanup === 'object' ? cleanup : { archiveWizard: true, pruneMessages: true, retainCount: 0 };
+      const archiveWizard = cfg.archiveWizard !== false;
+      const pruneMessages = cfg.pruneMessages !== false;
+      const retainCount = Math.max(0, Number(cfg.retainCount || 0));
+
+      const ctx = this.getContext();
+      const chat = Array.isArray(ctx?.chat) ? ctx.chat : null;
+      if (!chat) return info;
+
+      const startIndex = Number.isInteger(meta?.onboarding?.wizardStartIndex) ? meta.onboarding.wizardStartIndex : null;
+      if (startIndex == null || startIndex < 0 || startIndex >= chat.length) return info;
+
+      const pruneEnd = Math.max(startIndex, chat.length - retainCount);
+      const messagesToArchive = archiveWizard ? chat.slice(startIndex, pruneEnd).map((m) => this.cloneMessage(m)) : [];
+
+      if (messagesToArchive.length) {
+        const bucket = this.ensureArchiveBucket(meta);
+        bucket.push({
+          id: `archive-${Date.now()}`,
+          createdAt: new Date().toISOString(),
+          startIndex,
+          retainCount,
+          notes: {
+            scenarioId: activation?.scenario?.id || meta.onboarding?.scenarioId || null,
+            timelineTag: activation?.campaign?.timelineTag || null,
+            label: activation?.campaign?.label || null
+          },
+          messages: messagesToArchive
+        });
+        if (Array.isArray(meta.onboardingLog)) {
+          meta.onboardingLog.push({
+            type: 'scenario_archive',
+            at: new Date().toISOString(),
+            count: messagesToArchive.length
+          });
+        }
+        info.archivedCount = messagesToArchive.length;
+      }
+
+      if (pruneMessages && pruneEnd > startIndex) {
+        chat.splice(startIndex, pruneEnd - startIndex);
+        info.pruned = true;
+        try {
+          ctx.eventSource?.emit?.(ctx.eventTypes?.CHAT_CHANGED, { reason: 'stresCleanup' });
+          if (typeof window.renderChatHistory === 'function') window.renderChatHistory();
+        } catch {}
+      }
+
+      try { await ctx.saveChat?.(); } catch {}
+      meta.onboarding = meta.onboarding || {};
+      meta.onboarding.lastCleanup = {
+        at: new Date().toISOString(),
+        archivedCount: info.archivedCount,
+        pruned: info.pruned,
+        retainCount,
+        startIndex
+      };
+      return info;
+    },
+    async undoScenarioCleanup() {
+      const ctx = this.getContext();
+      const chat = Array.isArray(ctx?.chat) ? ctx.chat : null;
+      if (!chat) {
+        STRESChat.sendToChat('❌ Unable to access chat history for undo.');
+        return { ok: false };
+      }
+      const meta = this.getChatMeta();
+      const bucket = this.ensureArchiveBucket(meta);
+      if (!bucket.length) {
+        STRESChat.sendToChat('ℹ️ No archived onboarding messages to restore.');
+        return { ok: false };
+      }
+      const entry = bucket.pop();
+      if (!entry?.messages?.length) {
+        STRESChat.sendToChat('ℹ️ Archive empty. Nothing to restore.');
+        return { ok: false };
+      }
+      const insertAt = Math.min(entry.startIndex ?? chat.length, chat.length);
+      chat.splice(insertAt, 0, ...entry.messages.map((m) => this.cloneMessage(m)));
+      meta.onboarding = meta.onboarding || {};
+      meta.onboarding.phase = 'wizard_ready';
+      meta.onboarding.updatedAt = new Date().toISOString();
+      meta.onboarding.undoAt = meta.onboarding.updatedAt;
+      meta.onboarding.lastUndoSource = entry.id;
+      if (!Array.isArray(meta.onboardingLog)) meta.onboardingLog = [];
+      meta.onboardingLog.push({ type: 'scenario_undo', at: meta.onboarding.updatedAt, restored: entry.messages.length });
+      try {
+        ctx.eventSource?.emit?.(ctx.eventTypes?.CHAT_CHANGED, { reason: 'stresUndo' });
+        if (typeof window.renderChatHistory === 'function') window.renderChatHistory();
+        await ctx.saveChat?.();
+        await ctx.saveMetadata?.();
+      } catch {}
+      STRESChat.sendToChat('↩️ Restored onboarding conversation. You can rerun `/stres begin apply` when ready.');
+      return { ok: true };
+    },
+    async applyScenario(rawInput = '') {
+      const reducer = state.scenarioReducer;
+      if (!reducer || typeof reducer.apply !== 'function') {
+        STRESChat.sendToChat('❌ Scenario reducer not available. Please ensure the STRES extension is up to date.');
+        return { ok: false, error: 'Reducer missing' };
+      }
+
+      const info = await this.collectContext();
+      if (!info) {
+        STRESChat.sendToChat('❌ No active character card detected. Load a character card before applying a scenario.');
+        return { ok: false, error: 'No character context' };
+      }
+
+      let text = String(rawInput || '').trim();
+      let source = 'command';
+      if (!text || text.toLowerCase() === 'last') {
+        const candidate = this.findRecentArchitectPayload();
+        if (!candidate) {
+          STRESChat.sendToChat('❌ Could not find a recent architect JSON payload. Paste the JSON after `/stres begin apply` or use `/stres begin apply last` immediately after the architect replies.');
+          return { ok: false, error: 'No payload detected' };
+        }
+        text = candidate.raw;
+        source = candidate.source;
+      }
+
+      const payload = this.parseArchitectJson(text);
+      if (!payload || !this.isArchitectShape(payload)) {
+        STRESChat.sendToChat('❌ Unable to parse the scenario payload. Ensure you paste valid JSON containing `scenarioId` or `worldpackId`.');
+        return { ok: false, error: 'Parse failed' };
+      }
+
+      const meta = this.getChatMeta();
+      meta.onboarding = meta.onboarding || {};
+      meta.onboarding.phase = 'scenario_applying';
+      meta.onboarding.updatedAt = new Date().toISOString();
+      meta.onboarding.lastArchitectSource = source;
+      meta.onboarding.lastArchitectRaw = text;
+      await this.saveMetadata();
+
+      let result;
+      try {
+        result = await reducer.apply(payload, {});
+      } catch (error) {
+        console.error('[STRES] Scenario apply failed', error);
+        STRESChat.sendToChat('❌ Scenario application threw an error. See console for details.');
+        meta.onboarding.phase = 'wizard_ready';
+        await this.saveMetadata();
+        return { ok: false, error: error?.message || 'Exception' };
+      }
+
+      if (!result?.success) {
+        STRESChat.sendToChat(`❌ Scenario application failed: ${result?.error || 'Unknown error'}`);
+        meta.onboarding.phase = 'wizard_ready';
+        meta.onboarding.updatedAt = new Date().toISOString();
+        await this.saveMetadata();
+        return { ok: false, error: result?.error || 'Reducer failure' };
+      }
+
+      const nowIso = new Date().toISOString();
+      meta.onboarding.phase = 'scenario_applied';
+      meta.onboarding.updatedAt = nowIso;
+      meta.onboarding.lastScenarioAt = nowIso;
+      meta.onboarding.scenarioId = result.activation?.scenario?.id || payload.scenarioId || meta.onboarding.scenarioId || null;
+      meta.onboarding.timelineTag = result.activation?.campaign?.timelineTag || payload.timelineTag || meta.onboarding.timelineTag || null;
+      meta.onboarding.campaignLabel = result.activation?.campaign?.label || payload.campaignLabel || meta.onboarding.campaignLabel || null;
+      meta.onboarding.worldpackId = meta.onboarding.worldpackId || payload.worldpackId || info.worldpackId || null;
+      meta.onboarding.architectPayload = payload;
+      if (!Array.isArray(meta.onboardingLog)) meta.onboardingLog = [];
+      meta.onboardingLog.push({
+        type: 'scenario_applied',
+        at: nowIso,
+        source,
+        payload
+      });
+      const cleanupInfo = await this.performCleanup(result.activation?.cleanup, meta, result.activation);
+      if (result.activation?.scenario?.openingNarration) {
+        try { await STRESChat.addAssistantMessage?.('Narrator', result.activation.scenario.openingNarration); } catch {}
+      }
+      await this.saveMetadata();
+
+      const scenarioLabel = result.activation?.scenario?.label || payload.scenarioId || 'scenario';
+      const summaryLines = [`✅ Scenario **${scenarioLabel}** applied.`];
+      if (cleanupInfo?.archivedCount) summaryLines.push(`• Archived onboarding messages: ${cleanupInfo.archivedCount}`);
+      if (cleanupInfo?.pruned) summaryLines.push('• Chat cleaned for fresh campaign start.');
+      summaryLines.push('\nNext steps:');
+      summaryLines.push('• /stres scenarios — browse available scenes');
+      summaryLines.push('• /stres npc list — review active NPCs');
+      summaryLines.push('• /stres inject primer — reapply world primer if needed');
+      summaryLines.push('• /stres begin undo — restore the onboarding Q&A if you need to rerun apply');
+      STRESChat.sendToChat(summaryLines.join('\n'));
+      return { ok: true, activation: result.activation };
+    }
   };
 
   return module;

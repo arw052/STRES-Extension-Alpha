@@ -9,6 +9,7 @@ export const state = {
   lorebookManager: null,
   characterCardManager: null,
   worldMapViewer: null,
+  scenarioReducer: null,
 };
 
 export const setState = (key, value) => {
