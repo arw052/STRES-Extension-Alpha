@@ -1,124 +1,7 @@
-// STRES Extension Entry
-// Mounts UI components and wires SillyTavern integration without blocking chat.
-
-// STRES Extension Configuration
-const extensionName = "stres";
-const defaultSettings = {
-  serverUrl: "http://localhost:3001",
-  campaignId: null,
-  worldpackId: null,
-  chatCampaigns: {},
-  autoBindCampaignToChat: true,
-  budget: {
-    profile: 'Balanced',
-    contextTarget: 2000, // goal for composed prompt
-    cushion: 200,        // safety headroom
-    reserve: 200,        // held for tool calls/finishing
-    components: {
-      guard: { enabled: true, maxTokens: 60, sticky: true },
-      primer: { enabled: true, maxTokens: 600, sticky: false },
-      header: { enabled: true, maxTokens: 120, sticky: true },
-      summaries: { enabled: false, maxTokens: 250, sticky: false },
-      rag: { enabled: false, maxTokens: 300, topK: 2, sticky: false },
-      npc: { enabled: false, maxTokens: 400, sticky: false },
-      combat: { enabled: true, maxTokens: 220, sticky: true }
-    },
-    degrade: { order: ['rag','npc','summaries','primer','header','combat'] }
-  },
-  rag: {
-    enabled: false,
-    topK: 2,
-    maxTokens: 300,
-    position: 'in_prompt', // 'in_prompt' | 'in_chat'
-    depth: 0
-  },
-  npc: {
-    enabled: true,
-    inject: true,
-    topK: 2,
-    maxTokens: 400,
-    maxNPCs: 2,
-    activation: 'mention_or_state' // mention_only | state_only | mention_or_state
-  },
-  summary: {
-    enabled: true,
-    everyTurns: 6,
-    windowSize: 12,
-    maxItems: 10,
-    inject: false
-  },
-  state: {
-    enabled: true,
-    everyTurns: 6
-  },
-  world: {
-    regionId: null,
-    locationName: '',
-    locationType: '',
-    header: { enabled: true, template: '📍 {location} • {date} • {timeOfDay} • {weather}' }
-  },
-  autoInjection: {
-    enabled: true,
-    mode: "basic",
-    frequency: "every_message",
-    primer: true
-  },
-  ui: {
-    theme: "fantasy",
-    showHUD: true,
-    panelPosition: "right"
-  },
-  guard: {
-    enabled: true,
-    template: '🔒 Speak only as {char}. Do not reveal others\' private knowledge. Use only scene/world context and your own memory.'
-  },
-  cost: {
-    enabled: true,
-    showBadge: true,
-    pollMs: 300000, // 5 min
-    mode: 'poll', // 'poll' | 'on_turn'
-    lastBadge: null
-  },
-  telemetry: {
-    enabled: true,
-    logToChat: false,
-    keep: 20
-  },
-  setup: {
-    enabled: true,
-    // If true, apply only once per chat unless explicitly reset
-    oncePerChat: true
-  },
-  tools: {
-    enabled: true,
-    where: true,
-    tick: true,
-    update_state: true,
-    start_scenario: true,
-    npc_reply: true,
-    dice: true
-  },
-  // Phase 7 defaults
-  combat: {
-    enabled: true,
-    // Optional preset switch names; leave blank to ignore
-    presets: {
-      story: '',
-      explore: '',
-      combat: ''
-    },
-    // Cheap model for NPC/combat utility calls
-    npcModel: {
-      chat_completion_source: 'openrouter',
-      model: 'gpt-4o-mini',
-      max_tokens: 140
-    },
-    header: {
-      enabled: true,
-      template: '⚔️ Round {round} • Init: {order}'
-    }
-  }
-};
+import { extensionName, defaultSettings } from './modules/constants.js';
+import { state } from './modules/state.js';
+import STRESWorld from './modules/world.js';
+import { createOnboarding } from './modules/onboarding.js';
 
 // Override/extend chat helpers for Phase 7 features
 try {
@@ -179,226 +62,9 @@ try {
 
 // (moved) overrides appended after STRESChat definition
 
-// Override default to match current backend port
-defaultSettings.serverUrl = "http://localhost:3001";
 
-// Global STRES object
-let stresClient;
-let characterPanel;
-let autoInjector;
-let commandProcessor;
-let toolIntegration;
-let lorebookManager;
-let characterCardManager;
-let worldMapViewer;
-
-// STRES World/Sim helper
-const STRESWorld = {
-  lastState: null,
-  lastFetch: 0,
-  fetchCooldownMs: 8000,
-  observer: null,
-  manifestCache: null,
-  manifestFetchedAt: 0,
-  manifestTtlMs: 15000,
-
-  // Token count helper: uses ST getTokenCountAsync when available
-  async tokenCount(text) {
-    try {
-      const ctx = window.SillyTavern?.getContext?.();
-      if (ctx?.getTokenCountAsync) return await ctx.getTokenCountAsync(String(text||''));
-    } catch {}
-    // Fallback rough estimate (~4 chars per token)
-    const s = String(text || '');
-    return Math.ceil(s.length / 4) || 0;
-  },
-
-  async refresh(regionHint) {
-    const s = window.extension_settings?.[extensionName] || {};
-    const regionId = (regionHint || s.world?.regionId || '').trim() || undefined;
-    try {
-      const qp = regionId ? `?regionId=${encodeURIComponent(regionId)}` : '';
-      const api = (s.serverUrl || defaultSettings.serverUrl) + '/api/sim/state' + qp;
-      const res = await fetch(api);
-      const j = await res.json();
-      if (j?.success) { this.lastState = j.data; this.lastFetch = Date.now(); }
-    } catch {}
-    return this.lastState;
-  },
-
-  async getStateFresh() {
-    if (!this.lastState || (Date.now() - this.lastFetch) > this.fetchCooldownMs) {
-      await this.refresh();
-    }
-    return this.lastState;
-  },
-
-  async getManifestFresh() {
-    const now = Date.now();
-    if (!this.manifestCache || (now - this.manifestFetchedAt) > this.manifestTtlMs) {
-      try {
-        const res = await stresClient.getWorldpackManifest();
-        if (res?.success && res.manifest) {
-          this.manifestCache = res.manifest;
-          this.manifestFetchedAt = now;
-        }
-      } catch {}
-    }
-    return this.manifestCache;
-  },
-
-  async probe() {
-    const s = window.extension_settings?.[extensionName] || {};
-    const base = (s.serverUrl || defaultSettings.serverUrl || '').replace(/\/$/, '');
-    const out = { base, health: null, worldpack_manifest: null, worldpack_current: null, sim_state: null };
-    try {
-      const r = await fetch(base + '/health');
-      out.health = { ok: r.ok, status: r.status };
-    } catch (e) { out.health = { ok: false, error: String(e?.message||e) }; }
-    try {
-      const r = await fetch(base + '/api/worldpack/manifest');
-      let j = null; try { j = await r.json(); } catch {}
-      out.worldpack_manifest = { ok: r.ok && !!(j?.success), status: r.status, success: j?.success === true };
-    } catch (e) { out.worldpack_manifest = { ok: false, error: String(e?.message||e) }; }
-    try {
-      const r = await fetch(base + '/api/worldpack/current');
-      let j = null; try { j = await r.json(); } catch {}
-      out.worldpack_current = { ok: r.ok && !!(j?.success), status: r.status, success: j?.success === true };
-    } catch (e) { out.worldpack_current = { ok: false, error: String(e?.message||e) }; }
-    try {
-      const qp = s.world?.regionId ? ('?regionId='+encodeURIComponent(s.world.regionId)) : '';
-      const r = await fetch(base + '/api/sim/state' + qp);
-      out.sim_state = { ok: r.ok, status: r.status };
-    } catch (e) { out.sim_state = { ok: false, error: String(e?.message||e) }; }
-    return out;
-  },
-
-  formatHeader() {
-    const s = window.extension_settings?.[extensionName] || {};
-    const hdr = (s.world?.header) || defaultSettings.world.header;
-    const st = this.lastState;
-    const loc = (s.world?.locationName || s.world?.regionId || 'Unknown').trim() || 'Unknown';
-    const baseHeader = (template)=>{
-      if (!st) return `📍 ${loc}`;
-      const md = `${st.time?.month || ''} ${st.time?.day || ''}`.trim();
-      const date = md || st.time?.iso?.slice(0,10) || 'Date?';
-      const tod = st.time?.daySegment || 'time?';
-      const weather = st.weather?.condition || 'clear';
-      return (template)
-        .replace('{location}', loc)
-        .replace('{date}', date)
-        .replace('{timeOfDay}', tod)
-        .replace('{weather}', weather);
-    };
-    // Optional cost badge
-    let badge = '';
-    try {
-      const cs = s.cost || defaultSettings.cost;
-      if (cs.enabled && cs.showBadge) {
-        const t = s.cost?.lastBadge?.text || '';
-        if (t) badge = t + ' • ';
-      }
-    } catch {}
-    const inner = baseHeader(hdr.template || defaultSettings.world.header.template);
-    return `${badge}${inner}`;
-  },
-
-  async ensureHeaderForElement(mesEl) {
-    try {
-      const s = window.extension_settings?.[extensionName] || {};
-      if (!(s.world?.header?.enabled)) return;
-      if (!mesEl || mesEl.dataset?.stresHeaderApplied === '1') return;
-      // Heuristic: apply to assistant messages only (non-right aligned)
-      const isUser = mesEl.classList?.contains('right') || mesEl.classList?.contains('mes-user');
-      if (isUser) return;
-      const textEl = mesEl.querySelector('.mes_text') || mesEl.querySelector('.mes_text p') || mesEl;
-      if (!textEl) return;
-      // Skip if it already starts with our symbol
-      const raw = textEl.innerHTML || '';
-      if (/^\s*📍/.test(raw)) { mesEl.dataset.stresHeaderApplied = '1'; return; }
-      // Update state if needed
-      await this.getStateFresh();
-      const header = this.formatHeader();
-      textEl.innerHTML = `${header}\n\n${raw}`;
-      mesEl.dataset.stresHeaderApplied = '1';
-    } catch {}
-  },
-
-  observeChat() {
-    try {
-      const container = document.getElementById('chat') || document.body;
-      if (!container || this.observer) return;
-      this.observer = new MutationObserver((mutations) => {
-        for (const m of mutations) {
-          if (m.type !== 'childList') continue;
-          m.addedNodes?.forEach((node) => {
-            try {
-              if (!(node instanceof HTMLElement)) return;
-              if (node.classList?.contains('mes')) this.ensureHeaderForElement(node);
-              // nested nodes
-              node.querySelectorAll?.('.mes').forEach((el)=> this.ensureHeaderForElement(el));
-            } catch {}
-          });
-        }
-      });
-      this.observer.observe(container, { childList: true, subtree: true });
-    } catch {}
-  },
-
-  async scenario(idOrIndex) {
-    const s = window.extension_settings?.[extensionName] || {};
-    s.world = s.world || structuredClone(defaultSettings.world);
-    let sel = null;
-    let selectedScenario = null;
-    try {
-      const mf = await this.getManifestFresh();
-      const scenarios = Array.isArray(mf?.scenarios) ? mf.scenarios : [];
-      if (scenarios.length) {
-        const byIndex = scenarios[Number(idOrIndex) - 1];
-        const sc = scenarios.find(sc => sc.id === idOrIndex) || byIndex || null;
-        if (sc) {
-          selectedScenario = sc;
-          const region = (Array.isArray(mf.regions) ? mf.regions : []).find(r => r.id === sc.regionId);
-          sel = {
-            regionId: sc.regionId,
-            locationName: sc.locationName || region?.name || sc.regionId,
-            factors: sc.factors || region?.factors || { biome: region?.biome }
-          };
-        }
-      }
-    } catch {}
-    // Fallback mapping if manifest doesn’t define scenarios/regions
-    if (!sel) {
-      const fallback = {
-        '1': { regionId: 'veyra-capital', locationName: 'Veyrion Citadel', factors: { biome: 'urban', distanceToCoast: 30, elevation: 120, aridity: 0.4 } },
-        '2': { regionId: 'calvessia-capital', locationName: 'Calvess, Sea-Kings’ Hall', factors: { biome: 'coastal', distanceToCoast: 2, elevation: 15, aridity: 0.5 } },
-        '3': { regionId: 'veyra-capital', locationName: 'Veyrion Grand Market', factors: { biome: 'urban', distanceToCoast: 30, elevation: 120, aridity: 0.4 } },
-        '4': { regionId: 'greenwood-edge', locationName: 'Hamlet at Greenwood Edge', factors: { biome: 'forest', distanceToCoast: 80, elevation: 300, aridity: 0.3 } },
-        '5': { regionId: 'veyra-capital', locationName: 'Veyrion City (Inn Loft)', factors: { biome: 'urban', distanceToCoast: 30, elevation: 120, aridity: 0.4 } }
-      };
-      sel = fallback[String(idOrIndex)];
-    }
-    if (!sel) return { ok: false, message: 'Unknown scenario id' };
-    s.world.regionId = sel.regionId;
-    s.world.locationName = sel.locationName;
-    try {
-      const apiBase = s.serverUrl || defaultSettings.serverUrl;
-      await fetch(`${apiBase}/api/sim/region`, { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ regionId: sel.regionId, factors: sel.factors }) });
-    } catch {}
-    try { const ctx = window.SillyTavern?.getContext?.(); (ctx?.saveSettingsDebounced || window.saveSettingsDebounced)?.(); } catch {}
-    await this.refresh(sel.regionId);
-    return { ok: true, regionId: sel.regionId, locationName: sel.locationName, scenarioId: (selectedScenario && selectedScenario.id) || String(idOrIndex), scenarioLabel: selectedScenario?.label };
-  },
-
-  async listScenarios() {
-    try {
-      const mf = await this.getManifestFresh();
-      const scs = Array.isArray(mf?.scenarios) ? mf.scenarios : [];
-      return scs.map((s, i) => ({ index: i+1, id: s.id, label: s.label, regionId: s.regionId, locationName: s.locationName }));
-    } catch { return []; }
-  }
-};
-
+// Global STRES object references are tracked via modules/state.js
+let STRESOnboarding;
 // Narrator Card & Onboarding (Phase 12)
 const STRESNarrator = {
   ctx: null,
@@ -461,7 +127,7 @@ const STRESNarrator = {
       // Apply runtime effects
       try {
         if (s[extensionName].worldpackId) {
-          await stresClient.loadWorldpackById(s[extensionName].worldpackId).catch(()=>{});
+          await state.stresClient.loadWorldpackById(s[extensionName].worldpackId).catch(()=>{});
         }
         await STRESPrompts.refreshSceneHeaderInPrompt();
       } catch {}
@@ -539,6 +205,8 @@ const STRESNarrator = {
     } catch { return false; }
   }
 };
+
+// First-time setup scaffolding removed (see modules/onboarding.js)
 // LLM Tool registration (Phase 10)
 const STRESTools = {
   ctx: null,
@@ -842,7 +510,7 @@ const STRESRAG = {
     } catch {}
     // Fallback to manifest scan
     try {
-      const mfResp = await stresClient.getWorldpackManifest();
+      const mfResp = await state.stresClient.getWorldpackManifest();
       const mf = mfResp?.manifest || null;
       const docs = this.buildDocsFromManifest(mf);
       const scored = this.scoreDocs(query, docs).slice(0, topK);
@@ -945,7 +613,7 @@ const STRESNPC = {
     if (this.registry) return this.registry;
     const reg = {};
     try {
-      const resp = await stresClient.getWorldpackManifest();
+      const resp = await state.stresClient.getWorldpackManifest();
       const mf = resp?.manifest || null;
       const inst = Array.isArray(mf?.npcInstances) ? mf.npcInstances : [];
       const arch = Array.isArray(mf?.npcArchetypes) ? mf.npcArchetypes : [];
@@ -1577,7 +1245,7 @@ const STRESSetup = {
       try { (ctx?.saveSettingsDebounced || window.saveSettingsDebounced)?.(); } catch {}
       // Load worldpack & apply scenario/region
       if (data.worldpackId) {
-        try { await stresClient.loadWorldpackById(String(data.worldpackId)); } catch {}
+        try { await state.stresClient.loadWorldpackById(String(data.worldpackId)); } catch {}
       }
       if (data.scenarioId) {
         try { await STRESWorld.scenario(String(data.scenarioId)); } catch {}
@@ -1766,7 +1434,7 @@ const STRESPrompts = {
       if (!force) {
         const ai = s.autoInjection; if (!(ai?.enabled && ai?.primer)) return false;
       }
-      const res = await stresClient.getWorldpackManifest();
+      const res = await state.stresClient.getWorldpackManifest();
       if (!res?.success) return false;
       const primer = STRESChat.buildWorldpackPrimer(res.manifest);
       // Budget-aware allowance
@@ -1995,6 +1663,15 @@ const STRESChat = {
         case 'status':
           this.showStatus();
           return '';
+        case 'begin': {
+          const sub = (parts[2] || '').toLowerCase();
+          if (sub === 'status') { (async()=>{ await STRESOnboarding.showStatus(); })(); return ''; }
+          if (sub === 'refresh') { (async()=>{ await STRESOnboarding.refresh(); })(); return ''; }
+          if (sub === 'wizard') { (async()=>{ await STRESOnboarding.wizard(); })(); return ''; }
+          if (sub === 'script') { (async()=>{ await STRESOnboarding.showScriptSummary(); })(); return ''; }
+          (async()=>{ await STRESOnboarding.begin(); })();
+          return '';
+        }
         case 'onboard': {
           (async()=>{ const ok = await STRESNarrator.sendOnboarding(); this.sendToChat(ok? '✅ Onboarding sent' : '✅ Onboarding posted'); })();
           return '';
@@ -2502,7 +2179,7 @@ const STRESChat = {
           const s = window.extension_settings || (window.SillyTavern?.getContext?.().extensionSettings);
           s[extensionName] = s[extensionName] || {};
           s[extensionName].serverUrl = url.replace(/\/$/, '');
-          try { if (stresClient) stresClient.baseUrl = s[extensionName].serverUrl; } catch {}
+          try { if (state.stresClient) state.stresClient.baseUrl = s[extensionName].serverUrl; } catch {}
           try { const ctx = window.SillyTavern?.getContext?.(); (ctx?.saveSettingsDebounced || window.saveSettingsDebounced)?.(); } catch {}
           try { window.STRES?.refreshSettingsUI?.(); } catch {}
           this.sendToChat(`✅ API URL set to ${s[extensionName].serverUrl}`);
@@ -2603,7 +2280,7 @@ const STRESChat = {
     }
 
     try {
-      const cur = await stresClient.getCurrentWorldpack();
+      const cur = await state.stresClient.getCurrentWorldpack();
       if (cur && cur.success) {
         wpStatus = `${cur.id}@${cur.version}`;
       } else {
@@ -2633,7 +2310,7 @@ const STRESChat = {
 
   async showWorldpack() {
     try {
-      const cur = await stresClient.getCurrentWorldpack();
+      const cur = await state.stresClient.getCurrentWorldpack();
       if (cur && cur.success) {
         this.sendToChat(`**Worldpack**\n• Active: ${cur.id}@${cur.version}\n• Loaded At: ${cur.loadedAt || 'unknown'}`);
       } else {
@@ -2647,7 +2324,7 @@ const STRESChat = {
 
   async loadWorldpack(id) {
     try {
-      const res = await stresClient.loadWorldpackById(id);
+      const res = await state.stresClient.loadWorldpackById(id);
       const s = window.extension_settings || (window.SillyTavern?.getContext?.().extensionSettings);
       s[extensionName] = s[extensionName] || {};
       s[extensionName].worldpackId = id;
@@ -2765,8 +2442,8 @@ const STRESChat = {
       window.extension_settings[extensionName].serverUrl = "http://localhost:3001";
       try {
         // Update live client base if already created
-        if (stresClient && typeof stresClient === 'object') {
-          stresClient.baseUrl = window.extension_settings[extensionName].serverUrl;
+        if (state.stresClient && typeof state.stresClient === 'object') {
+          state.stresClient.baseUrl = window.extension_settings[extensionName].serverUrl;
         }
         const ctx = window.SillyTavern?.getContext?.();
         (ctx?.saveSettingsDebounced || window.saveSettingsDebounced)?.();
@@ -2788,6 +2465,7 @@ const STRESChat = {
 • /inventory remove [item] - Remove item
 • /inventory use [item] - Use item
 • /stres status - Show STRES status
+• /stres begin [status|refresh|wizard|script] - Detect card metadata and prep campaign setup
 • /stres worldpack - Show active worldpack
 • /stres worldpack load <id> - Load worldpack by ID
 • /stres scenarios - List worldpack-provided scenarios
@@ -2980,6 +2658,10 @@ const STRESChat = {
   }
 };
 
+// Instantiate onboarding module with runtime dependencies
+STRESOnboarding = createOnboarding({ STRESNarrator, STRESChat });
+try { window.STRESOnboarding = STRESOnboarding; } catch {}
+
 // Main initialization function
 async function initializeExtension() {
   console.log("[STRES] Extension starting...");
@@ -3001,7 +2683,7 @@ async function initializeExtension() {
   }
 
   // Initialize STRES client
-  stresClient = new STRESClient(extensionSettings[extensionName].serverUrl);
+  state.stresClient = new STRESClient(extensionSettings[extensionName].serverUrl);
 
   // Make settings globally accessible
   window.extension_settings = extensionSettings;
@@ -3032,7 +2714,7 @@ async function initializeExtension() {
   try {
     const s = window.extension_settings[extensionName];
     if (s.worldpackId) {
-      stresClient.loadWorldpackById(s.worldpackId).catch(()=>{});
+      state.stresClient.loadWorldpackById(s.worldpackId).catch(()=>{});
       try { const ai = s.autoInjection; if (ai?.enabled && ai?.primer) { setTimeout(()=>{ STRESChat.injectWorldpackPrimer().catch(()=>{}); }, 200); } } catch {}
     }
   } catch {}
@@ -3066,6 +2748,7 @@ async function initializeExtension() {
 
   // Initialize Narrator & Onboarding
   try { STRESNarrator.init(context); } catch {}
+  try { STRESOnboarding.init(context); } catch {}
 
   // Initialize Setup Wizard listener
   try { STRESSetup.init(context); } catch {}
@@ -3346,7 +3029,7 @@ function initializeUI() {
       const id = (inpWp.value || '').trim();
       if (!id) { notice.textContent = 'Enter a Worldpack ID first'; notice.dataset.visible = 'true'; setTimeout(()=>{ notice.dataset.visible = 'false'; }, 2000); return; }
       try {
-        const res = await stresClient.loadWorldpackById(id);
+        const res = await state.stresClient.loadWorldpackById(id);
         notice.textContent = `Loaded ${res.id}@${res.version}`;
         // Attempt auto-primer injection into prompt after load
         try { await STRESPrompts.injectPrimerInPrompt(true); } catch {}
@@ -3400,7 +3083,7 @@ function initializeUI() {
         const ctx = window.SillyTavern?.getContext?.();
         (ctx?.saveSettingsDebounced || window.saveSettingsDebounced)?.();
       } catch {}
-      try { if (stresClient) stresClient.baseUrl = s[extensionName].serverUrl; } catch {}
+      try { if (state.stresClient) state.stresClient.baseUrl = s[extensionName].serverUrl; } catch {}
       notice.textContent = 'Settings saved';
       notice.dataset.visible = 'true'; setTimeout(()=>{ notice.dataset.visible = 'false'; }, 2000);
       // Optional: quick probe
@@ -3519,7 +3202,7 @@ function initializeUI() {
     // Category builders
     const buildGeneral = ()=>{
       body.innerHTML='';
-      const api = mkInput('text', get(s,'serverUrl',''), { placeholder:'http://localhost:3001' }); api.addEventListener('change', onChange('serverUrl', (v)=>String(v).trim().replace(/\/$/, ''), ()=>{ try{ if(stresClient) stresClient.baseUrl = window.extension_settings[extensionName].serverUrl; }catch{} }));
+      const api = mkInput('text', get(s,'serverUrl',''), { placeholder:'http://localhost:3001' }); api.addEventListener('change', onChange('serverUrl', (v)=>String(v).trim().replace(/\/$/, ''), ()=>{ try{ if(state.stresClient) state.stresClient.baseUrl = window.extension_settings[extensionName].serverUrl; }catch{} }));
       const camp = mkInput('text', get(s,'campaignId','')); camp.addEventListener('change', onChange('campaignId'));
       const wp = mkInput('text', get(s,'worldpackId','')); wp.addEventListener('change', onChange('worldpackId'));
       const region = mkInput('text', get(s,'world.regionId','')); region.addEventListener('change', onChange('world.regionId'));
@@ -3857,7 +3540,7 @@ function integrateWithExtensionsManager() {
       s[extensionName].world.header.enabled = !!hdrOn.checked;
       s[extensionName].world.header.template = (hdrT.value || '').trim() || defaultSettings.world.header.template;
       s[extensionName].characterId = (chr.value || '').trim() || null;
-      try { if (stresClient) stresClient.baseUrl = s[extensionName].serverUrl; } catch {}
+      try { if (state.stresClient) state.stresClient.baseUrl = s[extensionName].serverUrl; } catch {}
       try { const ctx = window.SillyTavern?.getContext?.(); (ctx?.saveSettingsDebounced || window.saveSettingsDebounced)?.(); } catch {}
       try { window.STRES?.refreshSettingsUI?.(); } catch {}
       note.textContent = 'Settings saved.';
@@ -3873,7 +3556,7 @@ function integrateWithExtensionsManager() {
       const id = (wp.value || '').trim();
       if (!id) { note.textContent = 'Enter a Worldpack ID first'; return; }
       try {
-        const r = await stresClient.loadWorldpackById(id);
+        const r = await state.stresClient.loadWorldpackById(id);
         note.textContent = `Loaded ${r.id}@${r.version}`;
         try { await STRESPrompts.injectPrimerInPrompt(true); } catch {}
       }
