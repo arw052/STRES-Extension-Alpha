@@ -5,10 +5,21 @@ import { createOnboarding } from './modules/onboarding.js';
 
 // Normalize SillyTavern language setting so i18n falls back to English
 try {
-  const storedLang = localStorage.getItem('language');
+  const langKey = 'language';
+  const markerKey = 'stresLanguageNormalized';
+  const storedLang = localStorage.getItem(langKey);
   const effective = (storedLang || navigator.language || '').toLowerCase();
+  const alreadyNormalized = localStorage.getItem(markerKey) === '1';
   if (effective === 'en-us') {
-    localStorage.setItem('language', 'en');
+    localStorage.setItem(langKey, 'en');
+    if (!alreadyNormalized) {
+      localStorage.setItem(markerKey, '1');
+      // Reload once so SillyTavern picks up the new locale before i18n initializes
+      window.location.reload();
+    }
+  } else if (alreadyNormalized) {
+    // Clean up marker once we're stable so future language switches still work
+    localStorage.removeItem(markerKey);
   }
 } catch {}
 
