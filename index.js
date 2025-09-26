@@ -3,6 +3,15 @@ import { state } from './modules/state.js';
 import STRESWorld from './modules/world.js';
 import { createOnboarding } from './modules/onboarding.js';
 
+// Normalize SillyTavern language setting so i18n falls back to English
+try {
+  const storedLang = localStorage.getItem('language');
+  const effective = (storedLang || navigator.language || '').toLowerCase();
+  if (effective === 'en-us') {
+    localStorage.setItem('language', 'en');
+  }
+} catch {}
+
 // Override/extend chat helpers for Phase 7 features
 try {
   // Assistant-style message injector (e.g., NPC replies)
