@@ -67,6 +67,30 @@ export const defaultSettings = {
     theme: 'fantasy',
     showHUD: true,
     panelPosition: 'right',
+    hudPanelCollapsed: false,
+  },
+  hud: {
+    panel: {
+      enabled: true,
+      position: 'right',
+      collapsed: false,
+    },
+    prompt: {
+      enabled: true,
+    },
+    text: {
+      enabled: false,
+      mode: 'on_change', // off | on_change | each_message
+      prefix: '📊 Player Sheet',
+    },
+    alerts: {
+      enabled: true,
+      notifyIncrease: false,
+      notifyDecrease: true,
+      absoluteThreshold: 5,
+      relativeThreshold: 0.15,
+      showInChat: true,
+    },
   },
   guard: {
     enabled: true,
@@ -84,6 +108,25 @@ export const defaultSettings = {
     logToChat: false,
     keep: 20,
   },
+  destinations: {
+    defaultKey: 'orchestrator',
+    entries: {
+      orchestrator: {
+        label: 'STRES Orchestrator',
+        mode: 'plan',
+        intent: 'story',
+        routingOverrides: {}
+      },
+      tavern: {
+        label: 'SillyTavern Direct',
+        mode: 'direct',
+        targetModel: 'sillytavern/custom',
+        settings: {
+          stream: false
+        }
+      }
+    }
+  },
   setup: {
     enabled: true,
     oncePerChat: true,
@@ -96,6 +139,7 @@ export const defaultSettings = {
     start_scenario: true,
     npc_reply: true,
     dice: true,
+    spawn_options: false,
   },
   combat: {
     enabled: true,

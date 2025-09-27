@@ -126,31 +126,114 @@ export function createScenarioReducer({ STRESWorld }) {
       return header;
     },
 
+    normalizeHudField(entry, origin = 'scenario') {
+      if (!entry) return null;
+      if (typeof entry === 'string') {
+        return {
+          key: String(entry),
+          label: String(entry),
+          value: '',
+          category: 'general',
+          type: 'stat',
+          origin,
+          tags: [],
+          raw: entry
+        };
+      }
+      if (typeof entry !== 'object') return null;
+
+      const raw = deepClone(entry);
+      const key = entry.key || entry.id || entry.slug || entry.name;
+      if (!key) return null;
+
+      const label = entry.label || entry.name || entry.key || entry.id || 'Stat';
+      const tags = coerceArray(entry.tags).map((tag) => String(tag));
+      const valueObj = (entry.value && typeof entry.value === 'object' && !Array.isArray(entry.value)) ? entry.value : null;
+      const current = entry.current != null ? Number(entry.current) : (valueObj?.current != null ? Number(valueObj.current) : null);
+      const max = entry.max != null ? Number(entry.max) : (valueObj?.max != null ? Number(valueObj.max) : null);
+      const min = entry.min != null ? Number(entry.min) : (valueObj?.min != null ? Number(valueObj.min) : null);
+
+      let value = '';
+      if (entry.value != null && typeof entry.value !== 'object') {
+        value = String(entry.value);
+      } else if (entry.text != null) {
+        value = String(entry.text);
+      } else if (current != null && max != null) {
+        value = `${current}/${max}`;
+      } else if (current != null) {
+        value = String(current);
+      }
+
+      const normalized = {
+        key: String(key),
+        label: String(label),
+        value,
+        current: Number.isFinite(current) ? current : null,
+        max: Number.isFinite(max) ? max : null,
+        min: Number.isFinite(min) ? min : null,
+        unit: entry.unit || entry.unitSymbol || (valueObj?.unit) || null,
+        category: entry.category || entry.section || entry.group || (tags.includes('resource') ? 'resources' : 'general'),
+        type: entry.type || entry.kind || (tags.includes('resource') ? 'resource' : 'stat'),
+        tags,
+        priority: Number.isFinite(entry.priority) ? Number(entry.priority) : null,
+        icon: entry.icon || entry.emoji || null,
+        origin,
+        variant: entry.variant || entry.timeline || entry.timelineTag || null,
+        textMode: entry.textMode || entry.textPlacement || null,
+        format: entry.format || entry.template || null,
+        thresholds: entry.thresholds && typeof entry.thresholds === 'object' ? deepClone(entry.thresholds) : null,
+        metadata: entry.metadata && typeof entry.metadata === 'object' ? deepClone(entry.metadata) : null,
+        style: entry.style && typeof entry.style === 'object' ? deepClone(entry.style) : null,
+        extra: entry.extra && typeof entry.extra === 'object' ? deepClone(entry.extra) : null,
+        raw
+      };
+
+      if (!normalized.extra && valueObj?.extra && typeof valueObj.extra === 'object') {
+        normalized.extra = deepClone(valueObj.extra);
+      }
+
+      return normalized;
+    },
+
     buildHudOverrides(payload, scenario) {
-      const combined = [...coerceArray(scenario?.hudOverrides), ...coerceArray(payload.hudOverrides)];
-      return combined
-        .map((entry) => {
-          if (!entry) return null;
-          if (typeof entry === 'string') {
-            return { key: entry, label: entry, value: '' };
-          }
-          const key = entry.key || entry.id;
-          if (!key) return null;
-          return {
-            key,
-            label: entry.label || entry.name || key,
-            value: entry.value != null ? String(entry.value) : ''
-          };
-        })
+      const fromScenario = coerceArray(scenario?.hudOverrides)
+        .map((entry) => this.normalizeHudField(entry, 'scenario'))
         .filter(Boolean);
+      const fromPayload = coerceArray(payload.hudOverrides)
+        .map((entry) => this.normalizeHudField(entry, 'payload'))
+        .filter(Boolean);
+      return [...fromScenario, ...fromPayload];
+    },
+
+    buildRouting(manifest, scenario, payload) {
+      const merged = {};
+      const apply = (source) => {
+        if (!source || typeof source !== 'object') return;
+        Object.assign(merged, deepClone(source));
+      };
+
+      apply(manifest?.prompts?.routing);
+      apply(manifest?.promptRouting);
+      apply(manifest?.routing);
+      apply(scenario?.promptRouting || scenario?.routing);
+      apply(payload?.metadata?.routing);
+
+      return Object.keys(merged).length ? merged : null;
     },
 
     buildNpcPlacements(scenario) {
       const placements = coerceArray(scenario?.npcPlacements || scenario?.initialState?.npcPlacements);
       return placements.map((npc) => ({
-        templateId: npc.templateId || npc.id || npc.template || null,
-        spawnState: npc.spawnState === 'offscreen' ? 'offscreen' : 'active',
-        variantId: npc.variantId || npc.variant || null
+        templateId: npc.templateId || npc.template || npc.id || null,
+        instanceId: npc.instanceId || npc.id || null,
+        name: npc.name || npc.displayName || null,
+        displayName: npc.displayName || npc.name || null,
+        role: npc.role || npc.archetype || null,
+        spawnState: npc.spawnState === 'offscreen' ? 'offscreen' : (npc.spawnState || 'active'),
+        variantId: npc.variantId || npc.variant || null,
+        tags: coerceArray(npc.tags),
+        metadata: npc.metadata || null,
+        timelineTag: npc.timelineTag || null
       })).filter((npc) => npc.templateId);
     },
 
@@ -210,7 +293,8 @@ export function createScenarioReducer({ STRESWorld }) {
           id: options.campaignId || null,
           label: payload.campaignLabel || scenario.label || manifest?.title || 'STRES Campaign',
           timelineTag: payload.timelineTag || scenario.timelineTag || manifest?.defaultTimeline || null,
-          customFlags: payload.customFlags
+          customFlags: payload.customFlags,
+          worldpackId: payload.worldpackId || manifest.id || null
         },
         primer: this.buildPrimer(manifest, scenario),
         sceneHeader: this.buildSceneHeader(manifest, scenario),
@@ -220,6 +304,7 @@ export function createScenarioReducer({ STRESWorld }) {
         onboardingSummary: payload.onboardingSummary || this.composeSummary(payload, scenario),
         initialInjections: payload.initialInjections,
         metadata: payload.metadata,
+        routing: this.buildRouting(manifest, scenario, payload),
         scenario: {
           id: scenario.id || payload.scenarioId || null,
           label: scenario.label || scenario.name || payload.scenarioId || 'Scenario',
@@ -232,6 +317,8 @@ export function createScenarioReducer({ STRESWorld }) {
       const chatMeta = this.getChatMeta();
       if (chatMeta) {
         chatMeta.latestScenario = deepClone(activation);
+        if (activation.routing) chatMeta.routing = deepClone(activation.routing);
+        if (activation.campaign?.id) chatMeta.campaignId = activation.campaign.id;
         chatMeta.scenarioHistory.push({
           activatedAt: new Date().toISOString(),
           activation
@@ -240,15 +327,36 @@ export function createScenarioReducer({ STRESWorld }) {
       }
 
       const settings = window.extension_settings?.[extensionName];
+      let campaignId = options.campaignId || settings?.campaignId || chatMeta?.campaignId || null;
+      try {
+        if (!campaignId && typeof crypto !== 'undefined' && crypto.randomUUID) {
+          campaignId = crypto.randomUUID();
+        }
+      } catch {}
+      activation.campaign.id = campaignId;
       if (settings) {
         settings.worldpackId = payload.worldpackId || settings.worldpackId || null;
         settings.scenarioId = activation.scenario.id;
         settings.timelineTag = activation.campaign.timelineTag;
+        if (manifest?.tools && typeof manifest.tools === 'object') {
+          settings.tools = settings.tools || deepClone(defaultSettings.tools);
+          if (manifest.tools.spawnOptions != null) {
+            settings.tools.spawn_options = !!manifest.tools.spawnOptions;
+          }
+        }
+        if (campaignId) settings.campaignId = campaignId;
         if (ctx?.chatId) {
           settings.chatCampaigns = settings.chatCampaigns || {};
-          if (options.campaignId) settings.chatCampaigns[ctx.chatId] = options.campaignId;
+          if (campaignId) settings.chatCampaigns[ctx.chatId] = campaignId;
         }
         (ctx?.saveSettingsDebounced || window.saveSettingsDebounced || (() => {}))();
+        try { (state.toolIntegration || window.STRESTools)?.refresh?.(ctx); } catch {}
+      }
+
+      try {
+        await this.syncNpcActivation(activation, manifest, payload);
+      } catch (error) {
+        console.warn('[STRES] ScenarioReducer: NPC sync failed', error);
       }
 
       // Emit lightweight notification for future hooks
@@ -260,6 +368,59 @@ export function createScenarioReducer({ STRESWorld }) {
       }
 
       return { success: true, activation };
+    }
+  };
+
+  module.syncNpcActivation = async function syncNpcActivation(activation, manifest, payload) {
+    try {
+      if (!state.stresClient?.syncNpcPlacements) return;
+      const placements = Array.isArray(activation.npcPlacements)
+        ? activation.npcPlacements.map((npc) => ({
+            templateId: npc.templateId,
+            instanceId: npc.instanceId || null,
+            name: npc.name || null,
+            displayName: npc.displayName || null,
+            role: npc.role || null,
+            variantId: npc.variantId || null,
+            spawnState: npc.spawnState || 'active',
+            tags: npc.tags || null,
+            metadata: npc.metadata || null,
+            timelineTag: npc.timelineTag || null
+          }))
+        : [];
+      if (!placements.length) return;
+      const settings = window.extension_settings?.[extensionName] || {};
+      const campaignId = activation.campaign?.id || settings.campaignId;
+      if (!campaignId) return;
+      const sceneId = activation.sceneHeader?.metadata?.sceneId || activation.scenario?.id || null;
+      const worldpackId = activation.campaign?.worldpackId || settings.worldpackId || payload.worldpackId || manifest.id;
+      const response = await state.stresClient.syncNpcPlacements({
+        campaign: {
+          id: campaignId,
+          label: activation.campaign?.label || payload.campaignLabel || null
+        },
+        worldpackId,
+        timelineTag: activation.campaign?.timelineTag || payload.timelineTag || null,
+        scenarioId: activation.scenario?.id || null,
+        sceneId,
+        placements
+      });
+      if (response?.success === false) {
+        console.warn('[STRES] NPC sync response error', response.error);
+        return;
+      }
+      const payloadData = response?.data || response;
+      if (payloadData?.campaignId && settings) {
+        settings.campaignId = payloadData.campaignId;
+        try { (window.SillyTavern?.getContext?.()?.saveSettingsDebounced || window.saveSettingsDebounced)?.(); } catch {}
+      }
+      if (Array.isArray(payloadData?.npcs)) {
+        try { STRESNPC.applyBackendDirectory?.(payloadData.npcs); } catch (error) {
+          console.warn('[STRES] Failed to apply backend NPC directory', error);
+        }
+      }
+    } catch (error) {
+      console.warn('[STRES] syncNpcActivation failed', error);
     }
   };
 

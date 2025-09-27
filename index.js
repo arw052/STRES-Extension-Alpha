@@ -3,6 +3,8 @@ import { state } from './modules/state.js';
 import STRESWorld from './modules/world.js';
 import { createOnboarding } from './modules/onboarding.js';
 import createScenarioReducer from './modules/scenario.js';
+import createRoutingManager from './modules/routing.js';
+import createDestinationsManager from './modules/destinations.js';
 
 // Normalize SillyTavern language setting so i18n falls back to English
 try {
@@ -27,7 +29,7 @@ try {
 // Override/extend chat helpers for Phase 7 features
 try {
   // Assistant-style message injector (e.g., NPC replies)
-  STRESChat.addAssistantMessage = async function(name, text) {
+  STRESChat.addAssistantMessage = async function(name, text, options = {}) {
     try {
       const ctx = window.SillyTavern?.getContext?.();
       const message = {
@@ -36,7 +38,18 @@ try {
         is_system: false,
         send_date: Date.now(),
         mes: String(text||'').trim(),
-        extra: { api: 'manual', model: 'stres-npc', gen_id: Date.now() }
+        extra: (() => {
+          const extra = Object.assign({
+            api: 'manual',
+            model: 'stres-npc',
+            targetModel: 'stres-npc',
+            gen_id: Date.now()
+          }, options.extra || {});
+          if (extra.targetModel == null && extra.model) {
+            extra.targetModel = extra.model;
+          }
+          return extra;
+        })()
       };
       // Push and render
       ctx?.chat?.push?.(message);
@@ -326,21 +339,92 @@ const STRESTools = {
         stealth: false,
       });
 
-      // 5) npc_reply — have an NPC reply via a cheap model
+      // 5) spawn_options — request encounter candidates
+      if (this.isEnabled('spawn_options')) register({
+        name: 'stres_spawn_options',
+        displayName: 'STRES Spawn Options',
+        description: 'Return encounter candidates for the current biome and conditions.',
+        parameters: {
+          type: 'object',
+          properties: {
+            biome: { type: 'string', description: 'Biome identifier (forest, desert, etc.)' },
+            season: { type: 'string' },
+            weather: { type: 'string' },
+            timeOfDay: { type: 'string', enum: ['dawn','day','dusk','night'] },
+            lunarPhase: { type: 'string' },
+            elevation: { type: 'number' },
+            threat: { type: 'string', enum: ['low','medium','high','extreme'] },
+            regionId: { type: 'string' }
+          },
+          required: [],
+          additionalProperties: false
+        },
+        action: wrap('stres_spawn_options', { biome: true }, async (params) => {
+          const settings = window.extension_settings?.[extensionName] || {};
+          const meta = this.ctx?.chatMetadata?.stres || {};
+          const stateSnapshot = await STRESWorld.getStateFresh();
+          const scenarioActivation = meta.latestScenario || {};
+          const scenarioMetadata = scenarioActivation.metadata || scenarioActivation.sceneHeader?.metadata || {};
+
+          const biome = (params.biome || scenarioMetadata.biome || scenarioMetadata.factors?.biome || stateSnapshot?.environment?.biome);
+          if (!biome) {
+            return { ok: false, error: 'biome_required', message: 'Biome is required (supply via tool parameters or scenario metadata).' };
+          }
+
+          const inputs = {
+            biome: String(biome).trim(),
+            season: params.season || stateSnapshot?.time?.season || meta.timeSeason || null,
+            weather: params.weather || stateSnapshot?.weather?.condition || meta.weather || null,
+            timeOfDay: params.timeOfDay || stateSnapshot?.time?.daySegment || meta.timeOfDay || null,
+            lunarPhase: params.lunarPhase || stateSnapshot?.celestial?.moonPhases?.[0]?.phase || null,
+            elevation: typeof params.elevation === 'number' ? params.elevation : (scenarioMetadata.elevation ?? stateSnapshot?.environment?.elevation ?? undefined),
+            regionId: params.regionId || settings.world?.regionId || meta.regionId || undefined,
+            threat: params.threat || undefined
+          };
+
+          Object.keys(inputs).forEach((key) => { if (inputs[key] == null) delete inputs[key]; });
+
+          const response = await state.stresClient?.generateEncounter?.(inputs);
+          if (!response?.success) {
+            return { ok: false, error: response?.error?.message || response?.error || 'spawn_failed' };
+          }
+
+          const data = response.data || {};
+          return {
+            ok: true,
+            inputs: data.inputs || inputs,
+            options: data.outputs || [],
+            telemetry: { durationMs: data?.metrics?.durationMs }
+          };
+        }),
+        shouldRegister: async () => !!state.stresClient?.generateEncounter,
+        stealth: false,
+      });
+
+      // 6) npc_reply — have an NPC reply via a cheap model
       if (this.isEnabled('npc_reply')) register({
         name: 'stres_npc_reply',
         displayName: 'STRES NPC Reply',
         description: 'Compose a short NPC reply using a cheaper, separate model.',
         parameters: { type: 'object', properties: { npcId: { type: 'string' }, cue: { type: 'string' } }, required: ['npcId','cue'], additionalProperties: false },
         action: wrap('stres_npc_reply', { npcId:true, cue:true }, async ({ npcId, cue }) => {
-          const txt = await STRESCombat.npcReply(String(npcId), String(cue));
-          return { npcId, text: txt };
+          const result = await STRESCombat.npcReply(String(npcId), String(cue));
+          if (result?.ok) {
+            return {
+              ok: true,
+              npcId,
+              text: result.text,
+              route: result.route,
+              dispatchId: result.dispatchId
+            };
+          }
+          return { ok: false, npcId, error: result?.error || 'dispatch_failed' };
         }),
         shouldRegister: async () => !!this.ctx.ChatCompletionService,
         stealth: false,
       });
 
-      // 6) dice — roll dice and return results
+      // 7) dice — roll dice and return results
       if (this.isEnabled('dice')) register({
         name: 'stres_dice',
         displayName: 'STRES Dice',
@@ -366,7 +450,7 @@ const STRESTools = {
       this.ctx = ctx || this.ctx || window.SillyTavern?.getContext?.() || null;
       const TM = this.ctx?.ToolManager;
       if (!TM) return;
-      const names = ['stres_where','stres_tick','stres_update_state','stres_start_scenario','stres_npc_reply','stres_dice'];
+      const names = ['stres_where','stres_tick','stres_update_state','stres_start_scenario','stres_spawn_options','stres_npc_reply','stres_dice'];
       // Unregister disabled tools
       for (const n of names) {
         const key = n.replace('stres_','');
@@ -378,8 +462,16 @@ const STRESTools = {
     } catch (e) { console.warn('[STRES] Tools refresh failed', e); }
   }
 };
-// Expose helper for debugging/inspection
+const STRESRouting = createRoutingManager();
+const STRESDestinations = createDestinationsManager();
+
+try { state.destinations = STRESDestinations; } catch {}
+
+// Expose helpers for debugging/inspection
 try { window.STRESWorld = STRESWorld; } catch {}
+try { window.STRESRouting = STRESRouting; } catch {}
+try { window.STRESDestinations = STRESDestinations; } catch {}
+try { state.toolIntegration = STRESTools; } catch {}
 
 // Budgeting utilities
 const STRESBudget = {
@@ -520,6 +612,82 @@ const STRESRAG = {
   ctx: null,
   init(ctx) { this.ctx = ctx || window.SillyTavern?.getContext?.() || null; },
   getSettings() { const s = window.extension_settings?.[extensionName] || {}; return s.rag || defaultSettings.rag; },
+  toArray(value) { return Array.isArray(value) ? value : (value == null ? [] : [value]); },
+
+  getVisibilityContext() {
+    try {
+      const ctx = this.ctx || window.SillyTavern?.getContext?.();
+      const meta = ctx?.chatMetadata?.stres || {};
+      const last = meta.lastDispatch || {};
+      const actorId = last.actorId || null;
+      const sceneId = last.scene?.metadata?.sceneId || last.scene?.metadata?.locationId || null;
+      const participants = Array.isArray(last.participants) ? last.participants.map((p) => p?.id).filter(Boolean) : [];
+      return {
+        actorId,
+        sceneId,
+        participants,
+        mode: meta.mode || 'story'
+      };
+    } catch {
+      return { actorId: null, sceneId: null, participants: [], mode: 'story' };
+    }
+  },
+
+  filterByScope(items, context) {
+    const actorId = context?.actorId || null;
+    const sceneId = context?.sceneId || null;
+    const participantSet = new Set(Array.isArray(context?.participants) ? context.participants : []);
+    return (Array.isArray(items) ? items : []).filter((item) => {
+      try {
+        if (!item) return false;
+        const meta = item.meta || item.metadata || {};
+        const tags = [].concat(this.toArray(item.tags), this.toArray(meta.tags));
+        if (tags.some((tag) => typeof tag === 'string' && (tag.toLowerCase() === 'gm_only' || tag.toLowerCase() === 'private'))) {
+          return false;
+        }
+        const scope = meta.scope || meta.visibility || item.scope || null;
+        const text = String(item.text || '').toLowerCase();
+        if (text.includes('[secret]') || text.includes('gm only')) return false;
+        const allowByScope = () => {
+          if (!scope) return true;
+          if (typeof scope === 'string') {
+            const lower = scope.toLowerCase();
+            if (lower === 'public' || lower === 'global') return true;
+            if (lower === 'scene' || lower === 'scene_only') {
+              if (!sceneId) return false;
+              const metaScene = meta.sceneId || meta.scene || meta.sceneIds;
+              if (!metaScene) return true;
+              const allowedScenes = this.toArray(metaScene);
+              return allowedScenes.includes(sceneId);
+            }
+            if (lower.startsWith('npc:') || lower.startsWith('actor:')) {
+              const target = lower.split(':')[1];
+              return !!actorId && target === String(actorId).toLowerCase();
+            }
+            if (lower === 'participants') {
+              if (!actorId) return false;
+              if (participantSet.size === 0) return true;
+              return participantSet.has(actorId);
+            }
+          }
+          if (Array.isArray(scope)) {
+            return scope.includes(actorId) || scope.includes('public');
+          }
+          return true;
+        };
+        if (!allowByScope()) return false;
+        const actors = this.toArray(meta.actors || meta.actorIds || meta.allowedActors);
+        if (actors.length && (!actorId || !actors.includes(actorId))) return false;
+        const exclude = this.toArray(meta.excludeActors || meta.blockedActors);
+        if (exclude.length && actorId && exclude.includes(actorId)) return false;
+        const sceneMeta = this.toArray(meta.allowedScenes || meta.sceneId || meta.scenes);
+        if (sceneMeta.length && (!sceneId || !sceneMeta.includes(sceneId))) return false;
+        return true;
+      } catch {
+        return true;
+      }
+    });
+  },
 
   getQueryText() {
     try {
@@ -534,6 +702,7 @@ const STRESRAG = {
   async retrieve(query) {
     const cfg = this.getSettings();
     const topK = Math.max(1, Number(cfg.topK || 2));
+    const visibility = this.getVisibilityContext();
     // Try SillyTavern Vectors extension if available
     try {
       const ctx = this.ctx || window.SillyTavern?.getContext?.();
@@ -541,7 +710,13 @@ const STRESRAG = {
       if (vec?.search) {
         const results = await vec.search({ query, topK });
         if (Array.isArray(results) && results.length) {
-          return results.slice(0, topK).map(r => ({ text: r.text || r.chunk || r.content || '', score: r.score || 0.0, source: r.source || r.meta?.source || 'vectors' }));
+          const mapped = results.slice(0, topK).map(r => ({
+            text: r.text || r.chunk || r.content || '',
+            score: r.score || 0.0,
+            source: r.source || r.meta?.source || 'vectors',
+            meta: r.meta || r.metadata || {}
+          }));
+          return this.filterByScope(mapped, visibility);
         }
       }
     } catch {}
@@ -551,7 +726,7 @@ const STRESRAG = {
       const mf = mfResp?.manifest || null;
       const docs = this.buildDocsFromManifest(mf);
       const scored = this.scoreDocs(query, docs).slice(0, topK);
-      return scored;
+      return this.filterByScope(scored, visibility);
     } catch { return []; }
   },
 
@@ -566,7 +741,7 @@ const STRESRAG = {
         if (r.name) parts.push(`Region ${r.name}`);
         if (r.biome) parts.push(`Biome ${r.biome}`);
         if (r.factors) parts.push(Object.entries(r.factors).map(([k,v])=>`${k}:${v}`).join(', '));
-        docs.push({ text: parts.join(' • '), source: `region:${r.id||r.name||''}` });
+        docs.push({ text: parts.join(' • '), source: `region:${r.id||r.name||''}`, meta: { scope: 'public' } });
       }
       // Creatures
       const creatures = Array.isArray(mf.creatures) ? mf.creatures : [];
@@ -576,22 +751,22 @@ const STRESRAG = {
         if (c.biomes?.length) parts.push(`Biomes ${c.biomes.join(', ')}`);
         if (c.levelRange) parts.push(`Levels ${Array.isArray(c.levelRange)?c.levelRange.join('-'):c.levelRange}`);
         if (c.tags?.length) parts.push(c.tags.join(', '));
-        docs.push({ text: parts.join(' • '), source: `creature:${c.id||c.name||''}` });
+        docs.push({ text: parts.join(' • '), source: `creature:${c.id||c.name||''}`, meta: { scope: c.tags?.includes('secret') ? `npc:${(c.tags.find((tag)=>tag?.startsWith?.('npc:'))||'').split(':')[1] || ''}` : 'public' } });
       }
       // Crafting skills/items
       const skills = mf.crafting?.skills || [];
       for (const sk of (Array.isArray(skills)?skills:[])) {
-        docs.push({ text: `Crafting Skill ${sk.name||sk.id}`, source: `skill:${sk.id||sk.name||''}` });
+        docs.push({ text: `Crafting Skill ${sk.name||sk.id}`, source: `skill:${sk.id||sk.name||''}`, meta: { scope: 'public' } });
       }
       // Terminology
       const terms = mf.terminology || {};
       for (const [k,v] of Object.entries(terms)) {
-        docs.push({ text: `Term ${k} → ${v}`, source: `term:${k}` });
+        docs.push({ text: `Term ${k} → ${v}`, source: `term:${k}`, meta: { scope: 'public' } });
       }
       // Economy prices
       const prices = mf.economy?.basePrices || {};
       const priceKeys = Object.keys(prices).slice(0, 40);
-      if (priceKeys.length) docs.push({ text: `Prices: ${priceKeys.map(k=>`${k}:${prices[k]}`).join(', ')}`, source: 'economy' });
+      if (priceKeys.length) docs.push({ text: `Prices: ${priceKeys.map(k=>`${k}:${prices[k]}`).join(', ')}`, source: 'economy', meta: { scope: 'public' } });
     } catch {}
     // Scene state hints
     try {
@@ -614,7 +789,7 @@ const STRESRAG = {
       const t = String(d.text||'').toLowerCase();
       let score = 0;
       for (const w of terms) { if (w && t.includes(w)) score += 1; }
-      return { text: d.text, source: d.source, score };
+      return { text: d.text, source: d.source, score, meta: d.meta || {} };
     }).filter(x => x.score > 0).sort((a,b)=> b.score - a.score);
   },
 
@@ -654,6 +829,37 @@ const STRESNPC = {
 
   async ensureRegistry() {
     if (this.registry) return this.registry;
+    const meta = this.getMeta();
+    try {
+      if (Array.isArray(meta?.stres?.npc?.directory) && meta.stres.npc.directory.length) {
+        this.registry = this.buildRegistryFromBackend(meta.stres.npc.directory);
+        if (this.registry && Object.keys(this.registry).length) return this.registry;
+      }
+    } catch {}
+
+    try {
+      const settings = window.extension_settings?.[extensionName] || {};
+      const campaignId = settings.campaignId;
+      if (campaignId && state.stresClient?.listNpcs) {
+        const response = await state.stresClient.listNpcs(campaignId);
+        if (!(response?.success === false)) {
+          const data = response?.data || response;
+          const npcs = Array.isArray(data?.npcs) ? data.npcs : [];
+          if (Array.isArray(npcs) && npcs.length) {
+            if (meta && meta.stres) {
+              meta.stres.npc.directory = npcs;
+            }
+            this.registry = this.buildRegistryFromBackend(npcs);
+            if (this.registry && Object.keys(this.registry).length) {
+              return this.registry;
+            }
+          }
+        }
+      }
+    } catch (error) {
+      console.warn('[STRES] Failed to load NPCs from backend', error);
+    }
+
     const reg = {};
     try {
       const resp = await state.stresClient.getWorldpackManifest();
@@ -671,7 +877,6 @@ const STRESNPC = {
         reg[n.id || name] = { id: n.id || name, name, label: n.label || name, role: n.role || a.label || a.id || 'NPC', persona, tags: a.tags || [] };
       }
     } catch {}
-    // Minimal fallback if none in manifest
     this.registry = reg;
     return this.registry;
   },
@@ -684,6 +889,7 @@ const STRESNPC = {
     meta.stres.npc.presence = meta.stres.npc.presence || {}; // { id: { lastMention, inScene } }
     meta.stres.npc.facts = meta.stres.npc.facts || {};       // { id: [ {t, text} ] }
     meta.stres.npc.summaries = meta.stres.npc.summaries || {}; // { id: [ {t, text} ] }
+    if (!Array.isArray(meta.stres.npc.directory)) meta.stres.npc.directory = [];
     return meta;
   },
 
@@ -818,12 +1024,14 @@ const STRESNPC = {
     meta.stres.npc.presence[id] = meta.stres.npc.presence[id] || {};
     meta.stres.npc.presence[id].inScene = true;
     meta.stres.npc.presence[id].lastMention = Date.now();
+    this.syncPresence(id, true).catch(()=>{});
     (this.ctx?.saveMetadata?.());
   },
 
   markLeave(idOrName) {
     const meta = this.getMeta();
     if (meta.stres.npc.presence[idOrName]) meta.stres.npc.presence[idOrName].inScene = false;
+    this.syncPresence(idOrName, false).catch(()=>{});
     (this.ctx?.saveMetadata?.());
   },
 
@@ -891,32 +1099,212 @@ const STRESNPC = {
   },
 
   escapeReg(s) { return String(s||'').replace(/[.*+?^${}()|[\]\\]/g, '\\$&'); }
+
+  buildRegistryFromBackend(npcs) {
+    const registry = {};
+    const meta = this.getMeta();
+    const directory = Array.isArray(npcs) ? npcs : [];
+    if (meta && meta.stres) {
+      meta.stres.npc.directory = directory;
+    }
+    for (const npc of directory) {
+      if (!npc) continue;
+      const key = npc.templateId || npc.instanceId || npc.name || npc.id;
+      if (!key) continue;
+      const persona = this.formatBackendPersona(npc.persona || {});
+      const name = npc.displayName || npc.name || key;
+      registry[key] = {
+        id: key,
+        name,
+        label: npc.role ? `${name} — ${npc.role}` : name,
+        role: npc.role || null,
+        persona,
+        tags: Array.isArray(npc.tags) ? npc.tags : [],
+        campaignNpcId: npc.id,
+        backend: npc
+      };
+      if (meta?.stres?.npc?.presence) {
+        const pres = meta.stres.npc.presence;
+        const entry = pres[key] = pres[key] || {};
+        if (!entry.campaignNpcId) entry.campaignNpcId = npc.id;
+      }
+    }
+    return registry;
+  },
+
+  applyBackendDirectory(npcs) {
+    try {
+      this.registry = this.buildRegistryFromBackend(npcs);
+      this.lastInjectedKeys = new Set();
+      this.injectInPrompt().catch(()=>{});
+    } catch (error) {
+      console.warn('[STRES] Failed to apply backend NPC directory', error);
+    }
+  },
+
+  formatBackendPersona(persona) {
+    if (!persona || typeof persona !== 'object') return '';
+    const lines = [];
+    if (persona.summary) lines.push(persona.summary);
+    if (persona.speechStyle) lines.push(`Speech: ${persona.speechStyle}`);
+    if (Array.isArray(persona.likes) && persona.likes.length) {
+      lines.push(`Likes: ${persona.likes.slice(0, 3).join(', ')}`);
+    }
+    if (Array.isArray(persona.dislikes) && persona.dislikes.length) {
+      lines.push(`Dislikes: ${persona.dislikes.slice(0, 3).join(', ')}`);
+    }
+    if (Array.isArray(persona.goals) && persona.goals.length) {
+      lines.push(`Goals: ${persona.goals.slice(0, 2).join(', ')}`);
+    }
+    return lines.join(' • ');
+  },
+
+  async syncPresence(id, inScene) {
+    try {
+      if (!state.stresClient?.updateSceneParticipants) return;
+      const settings = window.extension_settings?.[extensionName] || {};
+      const campaignId = settings.campaignId;
+      if (!campaignId) return;
+      const meta = this.getMeta();
+      const latest = meta?.latestScenario || (Array.isArray(meta?.scenarioHistory) ? meta.scenarioHistory.slice(-1)[0]?.activation : null);
+      const sceneId = latest?.sceneHeader?.metadata?.sceneId || latest?.scenario?.id || null;
+      if (!sceneId) return;
+      const presence = meta?.stres?.npc?.presence?.[id];
+      const npcDirectory = meta?.stres?.npc?.directory || [];
+      const registry = this.registry || this.buildRegistryFromBackend(npcDirectory);
+      const entry = registry?.[id];
+      const campaignNpcId = entry?.backend?.id || entry?.campaignNpcId || presence?.campaignNpcId || null;
+      if (!campaignNpcId) return;
+      await state.stresClient.updateSceneParticipants({
+        campaignId,
+        sceneId,
+        participants: [{ npcId: campaignNpcId, inScene, role: entry?.role || null }]
+      });
+    } catch (error) {
+      console.warn('[STRES] Failed to sync NPC presence', error);
+    }
+  }
 };
 
-// Player HUD snapshot (Phase 4 foundation)
+// Player HUD snapshot (Phase 6 HUD + alerts)
 const STRESHud = {
   ctx: null,
   T: null,
   R: null,
+  panelRoot: null,
+  panelBody: null,
+  broadcasting: false,
+
   init(ctx) {
     this.ctx = ctx || window.SillyTavern?.getContext?.() || null;
     this.T = this.ctx?.extension_prompt_types || window.extension_prompt_types || { IN_PROMPT: 0, IN_CHAT: 1, BEFORE_PROMPT: 2 };
     this.R = this.ctx?.extension_prompt_roles || window.extension_prompt_roles || { SYSTEM: 0, USER: 1, ASSISTANT: 2 };
+    this.ensureStyles();
+    this.mountPanel();
     try {
       const es = this.ctx?.eventSource; const ET = this.ctx?.eventTypes || {};
       if (es && ET) {
-        const refresh = () => this.refreshHudInPrompt().catch(()=>{});
-        es.on(ET.MESSAGE_SENT, refresh);
-        es.on(ET.MESSAGE_RECEIVED, refresh);
-        es.on(ET.GENERATION_ENDED, refresh);
-        es.on(ET.CHAT_CHANGED, () => { refresh(); });
+        const handle = (reason) => { this.onChatEvent(reason).catch(()=>{}); };
+        es.on(ET.MESSAGE_SENT, () => handle('message_sent'));
+        es.on(ET.MESSAGE_RECEIVED, () => handle('message_received'));
+        es.on(ET.GENERATION_ENDED, () => handle('generation_ended'));
+        es.on(ET.CHAT_CHANGED, () => {
+          const hud = this.getHudState();
+          if (hud) {
+            hud.lastBroadcast = null;
+            hud.hasUnbroadcastChanges = true;
+          }
+          handle('chat_changed');
+        });
       }
+    } catch {}
+    this.onChatEvent('init').catch(()=>{});
+  },
+
+  clone(value) {
+    try { return structuredClone(value); } catch (error) {
+      try { return value != null ? JSON.parse(JSON.stringify(value)) : value; } catch { return value; }
+    }
+  },
+
+  ensureStyles() {
+    try {
+      const doc = document;
+      if (doc.getElementById('stres-hud-styles')) return;
+      const style = doc.createElement('style');
+      style.id = 'stres-hud-styles';
+      style.textContent = `#stres-hud-host{position:fixed;top:76px;right:12px;z-index:80;pointer-events:none;display:flex;flex-direction:column;gap:12px;max-width:min(320px,28vw);}#stres-hud-host[data-position="left"]{left:12px;right:auto;}#stres-hud-host[data-position="right"]{right:12px;left:auto;}#stres-hud-host[data-active="false"]{display:none;} .stres-hud-panel{pointer-events:auto;background:var(--stres-surface,rgba(20,20,20,0.92));color:var(--stres-text,#f1f1f1);border:1px solid var(--stres-border,rgba(255,255,255,0.15));border-radius:var(--stres-radius,10px);box-shadow:0 12px 32px rgba(0,0,0,0.45);min-width:240px;max-width:320px;display:flex;flex-direction:column;overflow:hidden;backdrop-filter:blur(12px);} .stres-hud-panel[data-collapsed="true"] .stres-hud-panel__body{display:none;} .stres-hud-panel__header{display:flex;align-items:center;justify-content:space-between;gap:8px;padding:0.6rem 0.75rem;background:rgba(0,0,0,0.25);font-weight:600;font-size:0.9rem;} .stres-hud-panel__title{display:flex;align-items:center;gap:6px;} .stres-hud-panel__actions{display:inline-flex;gap:4px;} .stres-hud-panel__button{border:none;background:transparent;color:inherit;cursor:pointer;border-radius:6px;padding:2px 6px;font-size:0.85rem;} .stres-hud-panel__button:hover{background:rgba(255,255,255,0.12);} .stres-hud-panel__body{padding:0.65rem 0.75rem 0.8rem;display:grid;gap:0.65rem;max-height:52vh;overflow:auto;} .stres-hud-section__title{font-size:0.78rem;text-transform:uppercase;letter-spacing:0.06em;color:var(--stres-muted,rgba(255,255,255,0.68));} .stres-hud-field{display:grid;gap:0.2rem;font-size:0.85rem;} .stres-hud-field__row{display:flex;align-items:center;justify-content:space-between;gap:0.5rem;} .stres-hud-field__label{font-weight:600;} .stres-hud-field__value{font-variant-numeric:tabular-nums;} .stres-hud-field__bar{width:100%;height:6px;background:rgba(255,255,255,0.12);border-radius:999px;overflow:hidden;} .stres-hud-field__bar-fill{height:100%;background:linear-gradient(90deg,var(--stres-accent,#6aa9ff),rgba(106,169,255,0.65));width:var(--pct,0%);transition:width 160ms ease;} .stres-hud-panel[data-empty="true"] .stres-hud-panel__body::after{content:'No player stats yet. Worldpacks can supply HUD data via hudOverrides.';font-size:0.78rem;opacity:0.7;}`;
+      doc.head.appendChild(style);
     } catch {}
   },
 
-  getSettings() {
-    const s = window.extension_settings?.[extensionName] || {};
-    return s.ui || defaultSettings.ui;
+  ensureConfig() {
+    const ctx = this.ctx || window.SillyTavern?.getContext?.();
+    const settingsRoot = window.extension_settings || (ctx?.extensionSettings) || (window.extension_settings = {});
+    let root = settingsRoot[extensionName];
+    if (!root) root = settingsRoot[extensionName] = this.clone(defaultSettings);
+    root.ui = root.ui || this.clone(defaultSettings.ui);
+    root.hud = root.hud || this.clone(defaultSettings.hud);
+    root.budget = root.budget || this.clone(defaultSettings.budget);
+    root.budget.components = root.budget.components || this.clone(defaultSettings.budget.components);
+    root.budget.components.hud = root.budget.components.hud || this.clone(defaultSettings.budget.components.hud);
+
+    const panel = root.hud.panel = root.hud.panel || this.clone(defaultSettings.hud.panel);
+    if (panel.enabled === undefined) panel.enabled = root.ui.showHUD ?? true;
+    if (!panel.position) panel.position = root.ui.panelPosition || defaultSettings.hud.panel.position;
+    if (panel.collapsed === undefined) panel.collapsed = root.ui.hudPanelCollapsed ?? defaultSettings.hud.panel.collapsed;
+
+    const prompt = root.hud.prompt = root.hud.prompt || this.clone(defaultSettings.hud.prompt);
+    if (prompt.enabled === undefined) prompt.enabled = root.budget.components.hud.enabled ?? true;
+    root.budget.components.hud.enabled = !!prompt.enabled;
+
+    const text = root.hud.text = root.hud.text || this.clone(defaultSettings.hud.text);
+    if (text.mode == null) text.mode = defaultSettings.hud.text.mode;
+    if (text.enabled === undefined) text.enabled = defaultSettings.hud.text.enabled;
+
+    const alerts = root.hud.alerts = root.hud.alerts || this.clone(defaultSettings.hud.alerts);
+    if (alerts.enabled === undefined) alerts.enabled = defaultSettings.hud.alerts.enabled;
+    if (alerts.notifyDecrease === undefined) alerts.notifyDecrease = defaultSettings.hud.alerts.notifyDecrease;
+    if (alerts.notifyIncrease === undefined) alerts.notifyIncrease = defaultSettings.hud.alerts.notifyIncrease;
+    if (alerts.absoluteThreshold === undefined) alerts.absoluteThreshold = defaultSettings.hud.alerts.absoluteThreshold;
+    if (alerts.relativeThreshold === undefined) alerts.relativeThreshold = defaultSettings.hud.alerts.relativeThreshold;
+    if (alerts.showInChat === undefined) alerts.showInChat = defaultSettings.hud.alerts.showInChat;
+
+    return { settingsRoot, root, ui: root.ui, hudConfig: root.hud, budget: root.budget.components.hud };
+  },
+
+  resolveSettings() {
+    const base = this.ensureConfig();
+    const meta = this.getMeta();
+    const overrides = meta?.stres?.hud?.displayOverrides || {};
+    const merge = (seed, ...layers) => {
+      const out = this.clone(seed || {});
+      for (const layer of layers) {
+        if (!layer || typeof layer !== 'object') continue;
+        for (const [key, val] of Object.entries(layer)) {
+          if (val && typeof val === 'object' && !Array.isArray(val)) {
+            out[key] = merge(out[key] || {}, val);
+          } else {
+            out[key] = val;
+          }
+        }
+      }
+      return out;
+    };
+    const resolved = {
+      panel: merge(defaultSettings.hud.panel, base.hudConfig.panel, overrides.panel),
+      prompt: merge(defaultSettings.hud.prompt, base.hudConfig.prompt, overrides.prompt),
+      text: merge(defaultSettings.hud.text, base.hudConfig.text, overrides.text),
+      alerts: merge(defaultSettings.hud.alerts, base.hudConfig.alerts, overrides.alerts)
+    };
+    if (base.ui.showHUD === false) resolved.panel.enabled = false;
+    resolved.panel.position = resolved.panel.position || base.ui.panelPosition || defaultSettings.hud.panel.position;
+    resolved.panel.collapsed = resolved.panel.collapsed ?? base.ui.hudPanelCollapsed ?? false;
+    if (base.hudConfig.prompt?.enabled === false || base.budget.enabled === false) resolved.prompt.enabled = false;
+    base.budget.enabled = !!resolved.prompt.enabled;
+    if (!resolved.text.mode || resolved.text.mode === 'off') resolved.text.enabled = false;
+    else resolved.text.enabled = resolved.text.enabled !== false;
+    return { ...base, resolved };
   },
 
   getMeta() {
@@ -924,89 +1312,352 @@ const STRESHud = {
     if (!ctx) return null;
     const meta = ctx.chatMetadata || (ctx.chatMetadata = {});
     meta.stres = meta.stres || {};
-    if (!meta.stres.hud) meta.stres.hud = { fields: [], lastUpdate: null };
+    const hud = meta.stres.hud || (meta.stres.hud = { fields: [], byKey: {}, history: [], alerts: [], lastUpdate: null, lastBroadcast: null });
+    if (!Array.isArray(hud.fields)) hud.fields = [];
+    if (!hud.byKey || typeof hud.byKey !== 'object') hud.byKey = {};
+    if (!Array.isArray(hud.history)) hud.history = [];
+    if (!Array.isArray(hud.alerts)) hud.alerts = [];
     return meta;
+  },
+
+  getHudState() {
+    const meta = this.getMeta();
+    return meta?.stres?.hud || null;
+  },
+
+  applyDisplayOverrides(overrides) {
+    if (!overrides || typeof overrides !== 'object') return;
+    const meta = this.getMeta();
+    if (!meta) return;
+    const hud = meta.stres.hud;
+    hud.displayOverrides = this.clone(overrides);
+    hud.hasUnbroadcastChanges = true;
   },
 
   applyScenarioActivation(activation) {
     try {
       if (!activation) return;
-      const meta = this.getMeta();
-      if (!meta) return;
-      const hud = meta.stres.hud || (meta.stres.hud = { fields: [], lastUpdate: null });
-      if (Array.isArray(activation.hudOverrides) && activation.hudOverrides.length) {
-        hud.fields = activation.hudOverrides.map((entry) => ({
-          key: entry.key || entry.id || entry.label || 'stat',
-          label: entry.label || entry.name || entry.key || entry.id || 'Stat',
-          value: entry.value != null ? String(entry.value) : '',
-        }));
-        hud.lastUpdate = Date.now();
+      const payload = [];
+      if (Array.isArray(activation.hudOverrides)) payload.push(...activation.hudOverrides);
+      const hudMeta = activation.metadata?.hud;
+      if (Array.isArray(hudMeta?.fields)) payload.push(...hudMeta.fields);
+      if (hudMeta && typeof hudMeta === 'object') {
+        const overrides = {};
+        ['panel', 'prompt', 'text', 'alerts'].forEach((key) => {
+          if (hudMeta[key] && typeof hudMeta[key] === 'object') overrides[key] = hudMeta[key];
+        });
+        if (Object.keys(overrides).length) this.applyDisplayOverrides(overrides);
       }
-      if (activation.metadata?.hud?.fields) {
-        const extra = activation.metadata.hud.fields;
-        if (Array.isArray(extra)) {
-          hud.fields = extra.map((entry) => ({
-            key: entry.key || entry.id || entry.label || 'stat',
-            label: entry.label || entry.name || entry.key || entry.id || 'Stat',
-            value: entry.value != null ? String(entry.value) : '',
-          }));
-          hud.lastUpdate = Date.now();
-        }
+      if (payload.length) {
+        this.setFields(payload, { origin: 'scenario', reason: 'scenario_activation', replace: true });
+      } else {
+        this.renderPanel();
+        this.refreshHudInPrompt().catch(()=>{});
       }
-      (this.ctx?.saveMetadata?.());
-      this.refreshHudInPrompt().catch(()=>{});
-    } catch {}
+    } catch (error) {
+      console.warn('[STRES] HUD scenario activation failed', error);
+    }
   },
 
-  updateField(key, value, label) {
+  normalizeField(entry, origin = 'update', previous = null) {
+    if (!entry) return null;
+    if (typeof entry === 'string') entry = { key: entry, label: entry };
+    const raw = entry.raw ? this.clone(entry.raw) : this.clone(entry);
+    const key = String(entry.key || entry.id || previous?.key || '').trim();
+    if (!key) return null;
+    const tags = Array.isArray(entry.tags) ? entry.tags.map((tag) => String(tag)) : (previous?.tags || []);
+    const valueObj = entry.value && typeof entry.value === 'object' && !Array.isArray(entry.value) ? entry.value : null;
+    const current = entry.current != null ? Number(entry.current) : (valueObj?.current != null ? Number(valueObj.current) : (previous?.current ?? null));
+    const max = entry.max != null ? Number(entry.max) : (valueObj?.max != null ? Number(valueObj.max) : (previous?.max ?? null));
+    const min = entry.min != null ? Number(entry.min) : (valueObj?.min != null ? Number(valueObj.min) : (previous?.min ?? null));
+    let value = entry.value;
+    if (valueObj) value = valueObj.display ?? valueObj.value;
+    if (value != null && typeof value === 'object') value = null;
+    if (value == null) {
+      if (Number.isFinite(current) && Number.isFinite(max)) value = `${current}/${max}`;
+      else if (Number.isFinite(current)) value = String(current);
+      else if (previous?.value != null) value = previous.value;
+      else value = '';
+    } else {
+      value = String(value);
+    }
+    const unit = entry.unit || valueObj?.unit || previous?.unit || null;
+    const category = (entry.category || entry.section || entry.group || previous?.category || (tags.includes('resource') ? 'resources' : 'general')).toString();
+    const label = entry.label || entry.name || previous?.label || key;
+    const icon = entry.icon || entry.emoji || previous?.icon || null;
+    const priority = Number.isFinite(entry.priority) ? Number(entry.priority) : (previous?.priority ?? null);
+    const display = entry.display && typeof entry.display === 'object'
+      ? this.clone(entry.display)
+      : (entry.metadata?.display && typeof entry.metadata.display === 'object' ? this.clone(entry.metadata.display) : (previous?.display ? this.clone(previous.display) : null));
+    const metadata = entry.metadata && typeof entry.metadata === 'object' ? this.clone(entry.metadata) : (previous?.metadata ? this.clone(previous.metadata) : null);
+    const thresholds = entry.thresholds && typeof entry.thresholds === 'object' ? this.clone(entry.thresholds) : (previous?.thresholds ? this.clone(previous.thresholds) : null);
+    const extra = entry.extra && typeof entry.extra === 'object'
+      ? this.clone(entry.extra)
+      : (valueObj?.extra && typeof valueObj.extra === 'object' ? this.clone(valueObj.extra) : (previous?.extra ? this.clone(previous.extra) : null));
+    const textMode = entry.textMode || entry.textPlacement || previous?.textMode || null;
+    const type = entry.type || entry.kind || previous?.type || (tags.includes('resource') ? 'resource' : 'stat');
+    const variant = entry.variant || entry.timeline || entry.timelineTag || previous?.variant || null;
+    const format = entry.format || entry.template || previous?.format || null;
+
+    return {
+      key,
+      label: String(label),
+      value,
+      current: Number.isFinite(current) ? current : null,
+      max: Number.isFinite(max) ? max : null,
+      min: Number.isFinite(min) ? min : null,
+      unit: unit != null ? String(unit) : null,
+      category,
+      type,
+      tags,
+      priority,
+      icon,
+      origin,
+      variant,
+      textMode,
+      format,
+      thresholds,
+      metadata,
+      display,
+      extra,
+      raw,
+      updatedAt: Date.now()
+    };
+  },
+
+  setFields(entries = [], options = {}) {
     try {
+      const { resolved } = this.resolveSettings();
+      const meta = this.getMeta();
+      if (!meta) return { changed: false, alerts: [] };
+      const hud = meta.stres.hud;
+      const prevMap = hud.byKey || {};
+      const normalized = [];
+      const nextMap = {};
+      const seen = new Set();
+      for (const entry of entries) {
+        const id = entry?.key || entry?.id;
+        const previous = id ? prevMap[String(id)] : null;
+        const field = this.normalizeField(entry, options.origin || entry.origin || 'update', previous);
+        if (!field) continue;
+        normalized.push(field);
+        nextMap[field.key] = field;
+        seen.add(field.key);
+      }
+      if (!options.replace) {
+        const existing = Array.isArray(hud.fields) ? hud.fields : [];
+        for (const prev of existing) {
+          if (seen.has(prev.key)) continue;
+          const clone = this.normalizeField(prev, prev.origin || 'history', prev);
+          if (!clone) continue;
+          normalized.push(clone);
+          nextMap[clone.key] = clone;
+        }
+      }
+      normalized.sort((a, b) => {
+        const pa = a.priority ?? 999;
+        const pb = b.priority ?? 999;
+        if (pa !== pb) return pa - pb;
+        return a.label.localeCompare(b.label);
+      });
+      const diffs = this.computeDifferences(prevMap, nextMap);
+      const alerts = this.detectAlerts(prevMap, nextMap, resolved.alerts);
+      hud.fields = normalized;
+      hud.byKey = nextMap;
+      hud.lastUpdate = Date.now();
+      hud.hasUnbroadcastChanges = hud.hasUnbroadcastChanges || diffs.length > 0;
+      hud.lastChangeKeys = diffs;
+      hud.lastOrigin = options.origin || null;
+      if (Array.isArray(hud.history)) {
+        hud.history.push({ at: Date.now(), keys: Array.from(seen), reason: options.reason || options.origin || 'update' });
+        if (hud.history.length > 50) hud.history.splice(0, hud.history.length - 50);
+      }
+      this.renderPanel();
+      this.refreshHudInPrompt().catch(()=>{});
+      if (alerts.length) this.handleAlerts(alerts, options);
+      (this.ctx?.saveMetadata?.());
+      return { changed: diffs.length > 0, alerts };
+    } catch (error) {
+      console.warn('[STRES] HUD update error', error);
+      return { changed: false, alerts: [] };
+    }
+  },
+
+  updateField(key, value, labelOrOptions, maybeOptions) {
+    try {
+      const options = (typeof labelOrOptions === 'object' && labelOrOptions !== null && !Array.isArray(labelOrOptions)) ? { ...labelOrOptions } : {};
+      if (typeof labelOrOptions === 'string') options.label = labelOrOptions;
+      if (typeof maybeOptions === 'object' && maybeOptions !== null) Object.assign(options, maybeOptions);
+      if (value != null && typeof value === 'object' && !Array.isArray(value)) Object.assign(options, value);
+      else if (value !== undefined) options.value = value;
+      options.key = key;
       const meta = this.getMeta();
       if (!meta) return false;
-      const hud = meta.stres.hud || (meta.stres.hud = { fields: [], lastUpdate: null });
-      const safeKey = String(key || '').trim();
-      if (!safeKey) return false;
-      const fields = Array.isArray(hud.fields) ? hud.fields : (hud.fields = []);
-      const existing = fields.find((f) => f.key === safeKey);
-      if (existing) {
-        if (label) existing.label = label;
-        existing.value = value;
-      } else {
-        fields.push({ key: safeKey, label: label || safeKey, value });
-      }
+      const hud = meta.stres.hud;
+      const prev = hud.byKey?.[key];
+      const field = this.normalizeField(options, options.origin || 'update', prev);
+      if (!field) return false;
+      hud.byKey = hud.byKey || {};
+      hud.fields = Array.isArray(hud.fields) ? hud.fields : [];
+      const idx = hud.fields.findIndex((f) => f.key === field.key);
+      if (idx >= 0) hud.fields[idx] = field; else hud.fields.push(field);
+      hud.byKey[field.key] = field;
       hud.lastUpdate = Date.now();
+      hud.hasUnbroadcastChanges = true;
+      const { resolved } = this.resolveSettings();
+      const alerts = prev ? this.detectAlerts({ [field.key]: prev }, { [field.key]: field }, resolved.alerts) : [];
+      if (alerts.length) this.handleAlerts(alerts, options);
       (this.ctx?.saveMetadata?.());
+      this.renderPanel();
       this.refreshHudInPrompt().catch(()=>{});
       return true;
-    } catch { return false; }
+    } catch {
+      return false;
+    }
   },
 
-  formatHud() {
-    try {
-      const cfg = this.getSettings();
-      if (!cfg?.showHUD) return '';
-      const meta = this.getMeta();
-      const hud = meta?.stres?.hud;
-      if (!hud || hud.suspend) return '';
-      const lines = [];
-      const fields = Array.isArray(hud.fields) ? hud.fields : [];
-      if (fields.length) {
-        lines.push('Player Sheet');
-        for (const field of fields) {
-          const label = field.label || field.key || 'Stat';
-          const value = field.value != null && String(field.value).trim() !== '' ? field.value : '—';
-          lines.push(`- ${label}: ${value}`);
-        }
+  computeDifferences(prevMap, nextMap) {
+    const keys = new Set([...(Object.keys(prevMap || {})), ...(Object.keys(nextMap || {}))]);
+    const diffs = [];
+    for (const key of keys) {
+      const prev = prevMap?.[key];
+      const next = nextMap?.[key];
+      if (!prev || !next) { if (prev || next) diffs.push(key); continue; }
+      if ((prev.value ?? '') !== (next.value ?? '')) { diffs.push(key); continue; }
+      if ((prev.current ?? null) !== (next.current ?? null)) { diffs.push(key); continue; }
+      if ((prev.max ?? null) !== (next.max ?? null)) { diffs.push(key); continue; }
+      if ((prev.min ?? null) !== (next.min ?? null)) { diffs.push(key); continue; }
+      if ((prev.unit ?? '') !== (next.unit ?? '')) diffs.push(key);
+    }
+    return diffs;
+  },
+
+  detectAlerts(prevMap, nextMap, config = {}) {
+    if (!config || config.enabled === false) return [];
+    const alerts = [];
+    for (const [key, next] of Object.entries(nextMap || {})) {
+      const prev = prevMap?.[key];
+      if (!prev || !next) continue;
+      if (!Number.isFinite(prev.current) || !Number.isFinite(next.current)) continue;
+      const delta = next.current - prev.current;
+      if (!delta) continue;
+      if (delta > 0 && config.notifyIncrease === false) continue;
+      if (delta < 0 && config.notifyDecrease === false) continue;
+      const absDelta = Math.abs(delta);
+      if (config.absoluteThreshold && absDelta < config.absoluteThreshold) continue;
+      const denominator = Number.isFinite(prev.max) ? Math.max(prev.max, 1) : Math.max(Math.abs(prev.current), 1);
+      if (config.relativeThreshold && (absDelta / denominator) < config.relativeThreshold) continue;
+      alerts.push({ key, delta, previous: prev, current: next });
+    }
+    return alerts;
+  },
+
+  formatAlertValue(field) {
+    if (!field) return '—';
+    if (Number.isFinite(field.current) && Number.isFinite(field.max) && field.max > 0) {
+      const base = `${field.current}/${field.max}`;
+      return field.unit ? `${base} ${field.unit}` : base;
+    }
+    if (Number.isFinite(field.current)) return field.unit ? `${field.current} ${field.unit}` : String(field.current);
+    if (field.value != null && String(field.value).trim() !== '') return field.unit ? `${field.value} ${field.unit}` : String(field.value);
+    return '—';
+  },
+
+  handleAlerts(alerts, options = {}) {
+    if (!alerts.length) return;
+    const { resolved } = this.resolveSettings();
+    if (!resolved.alerts.enabled) return;
+    const meta = this.getMeta();
+    const hud = meta?.stres?.hud;
+    if (!hud) return;
+    hud.alerts = Array.isArray(hud.alerts) ? hud.alerts : [];
+    const now = Date.now();
+    const lines = [];
+    for (const alert of alerts) {
+      const last = hud.alerts.find((item) => item.key === alert.key);
+      if (last && now - last.timestamp < 1500 && last.delta === alert.delta) continue;
+      const icon = alert.current.icon ? `${alert.current.icon} ` : '';
+      const deltaSymbol = alert.delta > 0 ? `+${alert.delta}` : `${alert.delta}`;
+      const prevDisplay = this.formatAlertValue(alert.previous);
+      const nextDisplay = this.formatAlertValue(alert.current);
+      lines.push(`${icon}${alert.current.label || alert.key}: ${prevDisplay} → ${nextDisplay} (${deltaSymbol})`);
+      hud.alerts.push({ key: alert.key, delta: alert.delta, timestamp: now });
+    }
+    hud.alerts = hud.alerts.slice(-50);
+    if (!lines.length) return;
+    if (resolved.alerts.showInChat !== false) {
+      STRESChat.addSystemMessage(lines.map((line) => `⚠️ ${line}`).join('\n')).catch(()=>{});
+    }
+  },
+
+  groupFields(fields, { target = 'prompt' } = {}) {
+    const groups = [];
+    const map = new Map();
+    for (const field of fields) {
+      if (!field) continue;
+      const display = field.display || {};
+      if (target === 'prompt' && display.prompt === false) continue;
+      if (target === 'panel' && display.panel === false) continue;
+      if (target === 'chat' && display.chat === false) continue;
+      const key = (field.category || 'general').toLowerCase();
+      if (!map.has(key)) {
+        const group = { key, label: this.formatCategoryLabel(key), fields: [] };
+        map.set(key, group);
+        groups.push(group);
       }
-      const state = meta?.stres?.state || {};
-      if (Array.isArray(state.objectives) && state.objectives.length) {
+      map.get(key).fields.push(field);
+    }
+    return groups;
+  },
+
+  formatCategoryLabel(category) {
+    if (!category || category === 'general') return null;
+    return category.replace(/[\-_]+/g, ' ').replace(/\b\w/g, (c) => c.toUpperCase());
+  },
+
+  formatFieldValue(field, { target = 'prompt' } = {}) {
+    if (!field) return null;
+    if (Number.isFinite(field.current) && Number.isFinite(field.max) && field.max > 0) {
+      const base = `${field.current}/${field.max}`;
+      return field.unit ? `${base} ${field.unit}` : base;
+    }
+    if (Number.isFinite(field.current)) return field.unit ? `${field.current} ${field.unit}` : String(field.current);
+    if (field.value != null && String(field.value).trim() !== '') return field.unit ? `${field.value} ${field.unit}` : String(field.value);
+    return null;
+  },
+
+  formatHud({ target = 'prompt' } = {}) {
+    const { resolved } = this.resolveSettings();
+    if (target === 'prompt' && !resolved.prompt.enabled) return '';
+    if (target === 'chat' && !resolved.text.enabled && target !== 'panel') return '';
+    const meta = this.getMeta();
+    if (!meta) return '';
+    const hud = meta.stres.hud;
+    const fields = Array.isArray(hud.fields) ? hud.fields : [];
+    const groups = this.groupFields(fields, { target });
+    const lines = [];
+    const hasStats = groups.some((group) => group.fields.length);
+    if (hasStats || target !== 'panel') lines.push('Player Sheet');
+    for (const group of groups) {
+      if (!group.fields.length) continue;
+      if (group.label) lines.push(`${group.label}:`);
+      for (const field of group.fields) {
+        const value = this.formatFieldValue(field, { target });
+        if (value == null) continue;
+        const icon = field.icon ? `${field.icon} ` : '';
+        lines.push(`- ${icon}${field.label || field.key}: ${value}`);
+      }
+    }
+    if (target !== 'panel') {
+      const objectives = meta.stres.state?.objectives;
+      if (Array.isArray(objectives) && objectives.length) {
         lines.push('Objectives:');
-        for (const objective of state.objectives.slice(0, 4)) {
+        for (const objective of objectives.slice(0, 4)) {
           lines.push(`• ${objective}`);
         }
       }
-      if (!lines.length) return '';
-      return lines.join('\n');
-    } catch { return ''; }
+    }
+    return lines.join('\n').trim();
   },
 
   buildFilter() {
@@ -1014,8 +1665,7 @@ const STRESHud = {
       try {
         const meta = this.getMeta();
         if (!meta) return true;
-        const mode = meta?.stres?.mode || 'story';
-        if (mode === 'ooc') return false;
+        if (meta.stres?.mode === 'ooc') return false;
         return true;
       } catch { return true; }
     };
@@ -1025,12 +1675,12 @@ const STRESHud = {
     try {
       const ctx = this.ctx || window.SillyTavern?.getContext?.();
       if (!ctx?.setExtensionPrompt) return false;
-      const cfg = this.getSettings();
-      if (!cfg?.showHUD) {
+      const { resolved, budget } = this.resolveSettings();
+      if (!resolved.prompt.enabled) {
         ctx.setExtensionPrompt('STRES_PLAYER_HUD', '', this.T.IN_CHAT, 0, false, this.R.USER);
         return false;
       }
-      const text0 = this.formatHud();
+      const text0 = this.formatHud({ target: 'prompt' });
       if (!text0) {
         ctx.setExtensionPrompt('STRES_PLAYER_HUD', '', this.T.IN_CHAT, 0, false, this.R.USER);
         return false;
@@ -1038,8 +1688,8 @@ const STRESHud = {
       const pred = await STRESBudget.predictTokens();
       pred.hud = await STRESWorld.tokenCount(text0);
       const decision = STRESBudget.decideAllowance(pred);
-      const allowed = decision.allowance?.hud || 0;
-      if (allowed <= 0) {
+      const allowed = decision.allowance?.hud ?? (budget.maxTokens || 0);
+      if (!allowed || allowed <= 0) {
         ctx.setExtensionPrompt('STRES_PLAYER_HUD', '', this.T.IN_CHAT, 0, false, this.R.USER);
         return false;
       }
@@ -1048,6 +1698,166 @@ const STRESHud = {
       try { await STRESTelemetry.recordComponent('HUD', text, { key: 'STRES_PLAYER_HUD', pos: 'IN_CHAT' }); } catch {}
       return true;
     } catch { return false; }
+  },
+
+  ensureHost() {
+    const doc = document;
+    let host = doc.getElementById('stres-hud-host');
+    if (!host) {
+      host = doc.createElement('div');
+      host.id = 'stres-hud-host';
+      (doc.getElementById('stres-extension-root') || doc.body).appendChild(host);
+    }
+    return host;
+  },
+
+  mountPanel() {
+    const host = this.ensureHost();
+    if (this.panelRoot && host.contains(this.panelRoot)) return this.panelRoot;
+    const doc = document;
+    const panel = doc.createElement('div'); panel.className = 'stres-hud-panel'; panel.dataset.collapsed = 'false'; panel.dataset.empty = 'true';
+    const header = doc.createElement('div'); header.className = 'stres-hud-panel__header';
+    const title = doc.createElement('span'); title.className = 'stres-hud-panel__title'; title.textContent = 'Player Sheet';
+    const actions = doc.createElement('div'); actions.className = 'stres-hud-panel__actions';
+    const btnSnapshot = doc.createElement('button'); btnSnapshot.type = 'button'; btnSnapshot.className = 'stres-hud-panel__button'; btnSnapshot.title = 'Post snapshot to chat'; btnSnapshot.textContent = '↗';
+    btnSnapshot.addEventListener('click', () => { this.postSnapshot({ prefix: '📊 Player Sheet' }).catch(()=>{}); });
+    const btnCollapse = doc.createElement('button'); btnCollapse.type = 'button'; btnCollapse.className = 'stres-hud-panel__button'; btnCollapse.title = 'Collapse panel'; btnCollapse.textContent = '▾';
+    btnCollapse.addEventListener('click', () => {
+      const { root } = this.ensureConfig();
+      root.hud.panel = root.hud.panel || {};
+      root.hud.panel.collapsed = !root.hud.panel.collapsed;
+      root.ui.hudPanelCollapsed = root.hud.panel.collapsed;
+      try { const ctx = this.ctx || window.SillyTavern?.getContext?.(); (ctx?.saveSettingsDebounced || window.saveSettingsDebounced)?.(); } catch {}
+      this.renderPanel();
+    });
+    actions.append(btnSnapshot, btnCollapse);
+    header.append(title, actions);
+    const body = doc.createElement('div'); body.className = 'stres-hud-panel__body';
+    panel.append(header, body);
+    host.appendChild(panel);
+    this.panelRoot = panel;
+    this.panelBody = body;
+    return panel;
+  },
+
+  updatePanelLayout() {
+    try {
+      const host = this.ensureHost();
+      const { resolved } = this.resolveSettings();
+      host.dataset.position = resolved.panel.position || 'right';
+      host.dataset.active = resolved.panel.enabled === false ? 'false' : 'true';
+      if (this.panelRoot) this.panelRoot.dataset.collapsed = resolved.panel.collapsed ? 'true' : 'false';
+    } catch {}
+  },
+
+  renderPanel() {
+    try {
+      const host = this.ensureHost();
+      const { resolved } = this.resolveSettings();
+      if (!resolved.panel.enabled) {
+        host.dataset.active = 'false';
+        if (this.panelRoot) this.panelRoot.style.display = 'none';
+        return;
+      }
+      const panel = this.mountPanel();
+      host.dataset.active = 'true';
+      panel.style.display = 'flex';
+      panel.dataset.collapsed = resolved.panel.collapsed ? 'true' : 'false';
+      host.dataset.position = resolved.panel.position || 'right';
+      const body = this.panelBody;
+      if (!body) return;
+      const state = this.getHudState();
+      const fields = Array.isArray(state?.fields) ? state.fields : [];
+      const groups = this.groupFields(fields, { target: 'panel' });
+      body.innerHTML = '';
+      let count = 0;
+      for (const group of groups) {
+        if (!group.fields.length) continue;
+        if (group.label) {
+          const title = document.createElement('div');
+          title.className = 'stres-hud-section__title';
+          title.textContent = group.label;
+          body.appendChild(title);
+        }
+        for (const field of group.fields) {
+          const value = this.formatFieldValue(field, { target: 'panel' });
+          if (value == null) continue;
+          count++;
+          const wrap = document.createElement('div'); wrap.className = 'stres-hud-field'; wrap.dataset.key = field.key;
+          const row = document.createElement('div'); row.className = 'stres-hud-field__row';
+          const label = document.createElement('span'); label.className = 'stres-hud-field__label'; label.textContent = (field.icon ? `${field.icon} ` : '') + (field.label || field.key);
+          const val = document.createElement('span'); val.className = 'stres-hud-field__value'; val.textContent = value;
+          row.append(label, val);
+          wrap.appendChild(row);
+          if (Number.isFinite(field.current) && Number.isFinite(field.max) && field.max > 0) {
+            const bar = document.createElement('div'); bar.className = 'stres-hud-field__bar';
+            const fill = document.createElement('div'); fill.className = 'stres-hud-field__bar-fill';
+            const pct = Math.min(100, Math.max(0, Math.round((field.current / field.max) * 100)));
+            fill.style.setProperty('--pct', `${pct}%`);
+            bar.appendChild(fill);
+            wrap.appendChild(bar);
+          }
+          body.appendChild(wrap);
+        }
+      }
+      if (count === 0) {
+        panel.dataset.empty = 'true';
+      } else {
+        panel.dataset.empty = 'false';
+      }
+      this.updatePanelLayout();
+    } catch (error) {
+      console.warn('[STRES] HUD render error', error);
+    }
+  },
+
+  async maybeBroadcast(reason, options = {}) {
+    try {
+      const { resolved } = this.resolveSettings();
+      if (!resolved.text.enabled) return false;
+      if (this.broadcasting) return false;
+      const hud = this.getHudState();
+      const changed = options.changed ?? hud?.hasUnbroadcastChanges ?? false;
+      if (resolved.text.mode === 'on_change' && !changed && !options.force) return false;
+      if (resolved.text.mode === 'each_message' && !['message_sent', 'message_received', 'generation_ended'].includes(reason) && !options.force) return false;
+      const text = this.formatHud({ target: 'chat' });
+      if (!text) return false;
+      const prefix = resolved.text.prefix || '📊 Player Sheet';
+      const payload = `${prefix}\n${text}`;
+      if (resolved.text.mode === 'on_change' && hud?.lastBroadcast === payload && !options.force) return false;
+      this.broadcasting = true;
+      await STRESChat.addSystemMessage(payload);
+      this.broadcasting = false;
+      if (hud) {
+        hud.lastBroadcast = payload;
+        hud.lastBroadcastAt = Date.now();
+        hud.hasUnbroadcastChanges = false;
+      }
+      return true;
+    } catch {
+      this.broadcasting = false;
+      return false;
+    }
+  },
+
+  async onChatEvent(reason) {
+    if (this.broadcasting && reason !== 'init') return;
+    await this.refreshHudInPrompt();
+    this.renderPanel();
+    const hud = this.getHudState();
+    const changed = hud?.hasUnbroadcastChanges ?? false;
+    await this.maybeBroadcast(reason, { changed });
+  },
+
+  async postSnapshot(options = {}) {
+    const text = this.formatHud({ target: 'chat' });
+    if (!text) {
+      STRESChat.sendToChat?.('Player HUD is empty.');
+      return false;
+    }
+    const prefix = options.prefix || '📊 Player Sheet';
+    await STRESChat.addSystemMessage(`${prefix}\n${text}`);
+    return true;
   }
 };
 
@@ -1169,26 +1979,32 @@ const STRESCombat = {
   // NPC quick reply via cheaper model
   async npcReply(npcId, cue) {
     try {
-      const ctx = this.ctx || window.SillyTavern?.getContext?.();
+      const manager = state.routingManager || STRESRouting;
       const reg = await STRESNPC.ensureRegistry();
-      const npc = reg?.[npcId] || { id: npcId, name: npcId, persona: '' };
-      const scene = STRESWorld.formatHeader();
-      const sys = `You are ${npc.name}. ${npc.persona||''}. Keep replies concise (1–2 sentences). Do not reveal hidden info.`.trim();
-      const user1 = `Scene: ${scene}`;
-      const user2 = String(cue||'').slice(0, 400);
-      const messages = [
-        { role: 'system', content: sys },
-        { role: 'user', content: user1 },
-        { role: 'user', content: user2 },
-      ];
-      const mcfg = this.getSettings()?.npcModel || defaultSettings.combat.npcModel;
-      const req = { messages, model: mcfg.model, chat_completion_source: mcfg.chat_completion_source, max_tokens: Number(mcfg.max_tokens || 140) };
-      const res = await ctx.ChatCompletionService?.processRequest?.(req, { presetName: null });
-      if (!res) return '';
-      if (typeof res === 'function') return '';
-      const text = res?.content || res?.result || '';
-      return String(text || '').trim();
-    } catch { return ''; }
+      const npc = reg?.[npcId] || { id: npcId, name: npcId, persona: '', tags: [] };
+      const result = await manager.dispatch({
+        intent: 'npc',
+        actorId: npcId,
+        actorName: npc.name,
+        actorTags: npc.tags || [],
+        userPrompt: String(cue || ''),
+        metadata: { cue: String(cue || ''), npcId },
+        systemPrompt: npc.persona ? `You are ${npc.name}. ${npc.persona}` : undefined
+      });
+      if (!result?.ok) {
+        return { ok: false, error: result?.diagnostics?.error || 'No response', route: result?.route || null };
+      }
+      return {
+        ok: true,
+        text: result.text,
+        route: result.route,
+        dispatchId: result.dispatchId,
+        source: result.source,
+        segments: result.segments
+      };
+    } catch (error) {
+      return { ok: false, error: error?.message || String(error), route: null };
+    }
   }
 };
 
@@ -1390,6 +2206,17 @@ const STRESTelemetry = {
   ctx: null,
   current: null,
   getSettings() { const s = window.extension_settings?.[extensionName] || {}; return s.telemetry || defaultSettings.telemetry; },
+  ensureCurrent() {
+    if (!this.getSettings().enabled) return null;
+    if (!this.current) {
+      this.current = { t: Date.now(), components: [], tools: [], rag: null, audit: null };
+    } else if (this.current && typeof this.current === 'object') {
+      this.current.components = this.current.components || [];
+      this.current.tools = this.current.tools || [];
+      if (!('audit' in this.current)) this.current.audit = null;
+    }
+    return this.current;
+  },
   init(ctx) {
     try {
       this.ctx = ctx || window.SillyTavern?.getContext?.() || null;
@@ -1403,30 +2230,51 @@ const STRESTelemetry = {
   },
   resetTurn() {
     if (!this.getSettings().enabled) return;
-    this.current = { t: Date.now(), components: [], tools: [], rag: null };
+    this.current = { t: Date.now(), components: [], tools: [], rag: null, audit: null };
   },
   async recordComponent(name, text, meta={}) {
     try {
       if (!this.getSettings().enabled) return;
       const tokens = await STRESWorld.tokenCount(String(text||''));
-      this.current = this.current || { t: Date.now(), components: [], tools: [], rag: null };
-      this.current.components.push({ name, tokens, meta });
+      const current = this.ensureCurrent();
+      if (!current) return;
+      current.components.push({ name, tokens, meta });
     } catch {}
   },
   logTool(name, params, result) {
     try {
       if (!this.getSettings().enabled) return;
-      this.current = this.current || { t: Date.now(), components: [], tools: [], rag: null };
+      const current = this.ensureCurrent();
+      if (!current) return;
       const ok = !(result && result.error);
       const brief = { name, ok, params: typeof params==='object' ? Object.keys(params) : String(params).slice(0,60), t: Date.now() };
-      this.current.tools.push(brief);
+      current.tools.push(brief);
     } catch {}
   },
   logRAG(query, items, allowance) {
     try {
       if (!this.getSettings().enabled) return;
-      this.current = this.current || { t: Date.now(), components: [], tools: [], rag: null };
-      this.current.rag = { q: String(query||'').slice(0,120), k: Array.isArray(items)?items.length:0, allowance: Number(allowance||0) };
+      const current = this.ensureCurrent();
+      if (!current) return;
+      current.rag = { q: String(query||'').slice(0,120), k: Array.isArray(items)?items.length:0, allowance: Number(allowance||0) };
+    } catch {}
+  },
+  recordAudit(audit) {
+    try {
+      if (!this.getSettings().enabled) return;
+      if (!audit) return;
+      const current = this.ensureCurrent();
+      if (!current) return;
+      current.audit = {
+        promptHash: audit.promptHash || '',
+        components: Array.isArray(audit.components) ? audit.components.map((c) => ({
+          key: c.key || 'unknown',
+          included: !!c.included,
+          reason: c.reason || 'unspecified'
+        })) : [],
+        warnings: Array.isArray(audit.warnings) ? audit.warnings.slice(0, 8) : [],
+        redactions: Array.isArray(audit.redactions) ? audit.redactions.slice(0, 20) : []
+      };
     } catch {}
   },
   async commit() {
@@ -1435,7 +2283,7 @@ const STRESTelemetry = {
       const ctx = this.ctx || window.SillyTavern?.getContext?.();
       const meta = ctx?.chatMetadata || (ctx.chatMetadata = {});
       meta.stres = meta.stres || {};
-      const rec = this.current || { t: Date.now(), components: [], tools: [], rag: null };
+      const rec = this.current || { t: Date.now(), components: [], tools: [], rag: null, audit: null };
       // Compute totals
       const total = rec.components.reduce((a,c)=> a + (Number(c.tokens)||0), 0);
       rec.total = total;
@@ -1446,7 +2294,8 @@ const STRESTelemetry = {
       await ctx.saveMetadata?.();
       if (this.getSettings().logToChat) {
         const comp = rec.components.map(c=> `${c.name}:${c.tokens}`).join(' • ');
-        STRESChat.sendToChat(`🧮 Tokens: ${total} (${comp})`);
+        const hashText = rec.audit?.promptHash ? ` • hash:${rec.audit.promptHash.slice(0,12)}` : '';
+        STRESChat.sendToChat(`🧮 Tokens: ${total} (${comp})${hashText}`);
       }
       return true;
     } catch { return false; }
@@ -1457,8 +2306,37 @@ const STRESTelemetry = {
       if (!t) { STRESChat.sendToChat('No telemetry yet.'); return; }
       const comp = t.components.map(c=> `• ${c.name}: ${c.tokens}`).join('\n');
       const rag = t.rag ? (`\n• RAG: k=${t.rag.k}, allowance=${t.rag.allowance}`) : '';
-      STRESChat.sendToChat(`**Telemetry**\n• Total: ${t.total}\n${comp}${rag}`);
+      const audit = t.audit && t.audit.promptHash ? (`\n• Hash: ${t.audit.promptHash}`) : '';
+      const warns = t.audit && Array.isArray(t.audit.warnings) && t.audit.warnings.length ? (`\n• Warnings: ${t.audit.warnings.join(', ')}`) : '';
+      STRESChat.sendToChat(`**Telemetry**\n• Total: ${t.total}\n${comp}${rag}${audit}${warns}`);
     } catch { STRESChat.sendToChat('Failed to show telemetry.'); }
+  },
+  showAudit(target = 'last') {
+    try {
+      const meta = this.ctx?.chatMetadata?.stres || {};
+      let audit = null;
+      if (target === 'dispatch') {
+        audit = meta.lastDispatch?.audit || null;
+      }
+      if (!audit && Array.isArray(meta.telemetry) && meta.telemetry.length) {
+        audit = meta.telemetry.slice(-1)[0]?.audit || null;
+      }
+      if (!audit) {
+        audit = this.current?.audit || null;
+      }
+      if (!audit) {
+        STRESChat.sendToChat('No audit record available.');
+        return;
+      }
+      const compLines = Array.isArray(audit.components) && audit.components.length
+        ? audit.components.map((c) => `${c.included ? '✅' : '⛔️'} ${c.key} (${c.reason || 'reason?'})`).join('\n')
+        : 'None';
+      const warnLine = Array.isArray(audit.warnings) && audit.warnings.length ? (`\n• Warnings: ${audit.warnings.join(', ')}`) : '';
+      const redLine = Array.isArray(audit.redactions) && audit.redactions.length ? (`\n• Redactions: ${audit.redactions.length}`) : '';
+      STRESChat.sendToChat(`**Prompt Audit**\n• Hash: ${audit.promptHash || 'n/a'}\n• Components:\n${compLines}${warnLine}${redLine}`);
+    } catch {
+      STRESChat.sendToChat('Failed to show audit details.');
+    }
   }
 };
 
@@ -1752,6 +2630,11 @@ const STRESPrompts = {
       meta.stres = meta.stres || {};
       meta.stres.latestScenario = meta.stres.latestScenario || {};
       Object.assign(meta.stres.latestScenario, activation, { appliedAt: new Date().toISOString() });
+      if (activation.routing) {
+        try { meta.stres.routing = structuredClone(activation.routing); } catch { meta.stres.routing = JSON.parse(JSON.stringify(activation.routing)); }
+      } else if (activation.metadata?.routing) {
+        try { meta.stres.routing = structuredClone(activation.metadata.routing); } catch { meta.stres.routing = JSON.parse(JSON.stringify(activation.metadata.routing)); }
+      }
 
       const settings = window.extension_settings?.[extensionName];
       if (settings) {
@@ -2017,6 +2900,67 @@ class STRESClient {
       return res;
     } catch (error) { return { success: false, error: error.message }; }
   }
+
+  async dispatchPrompt(body) {
+    try {
+      return await this.request('/prompt/dispatch', {
+        method: 'POST',
+        body: JSON.stringify(body)
+      });
+    } catch (error) {
+      return { success: false, error: error?.message || String(error) };
+    }
+  }
+
+  async generateEncounter(inputs) {
+    try {
+      return await this.request('/generate/encounter', {
+        method: 'POST',
+        body: JSON.stringify({ inputs })
+      });
+    } catch (error) {
+      return { success: false, error: error?.message || String(error) };
+    }
+  }
+
+  async getPromptRouting() {
+    try {
+      return await this.request('/prompt/routing');
+    } catch (error) {
+      return { success: false, error: error?.message || String(error) };
+    }
+  }
+
+  async syncNpcPlacements(body) {
+    try {
+      return await this.request('/npc/sync', {
+        method: 'POST',
+        body: JSON.stringify(body)
+      });
+    } catch (error) {
+      return { success: false, error: error?.message || String(error) };
+    }
+  }
+
+  async listNpcs(campaignId) {
+    if (!campaignId) return { success: false, error: 'campaignId required' };
+    try {
+      return await this.request(`/npc/${encodeURIComponent(campaignId)}`);
+    } catch (error) {
+      return { success: false, error: error?.message || String(error) };
+    }
+  }
+
+  async updateSceneParticipants(body) {
+    try {
+      return await this.request('/npc/scene', {
+        method: 'POST',
+        body: JSON.stringify(body)
+      });
+    } catch (error) {
+      return { success: false, error: error?.message || String(error) };
+    }
+  }
 }
 
 // STRES Chat Integration
@@ -2077,6 +3021,11 @@ const STRESChat = {
         case 'status':
           this.showStatus();
           return '';
+        case 'audit': {
+          const sub = (parts[2] || '').toLowerCase();
+          (async()=>{ STRESTelemetry.showAudit(sub === 'dispatch' ? 'dispatch' : 'last'); })();
+          return '';
+        }
         case 'begin': {
           const sub = (parts[2] || '').toLowerCase();
           if (sub === 'status') { (async()=>{ await STRESOnboarding.showStatus(); })(); return ''; }
@@ -2090,6 +3039,158 @@ const STRESChat = {
             return '';
           }
           (async()=>{ await STRESOnboarding.begin(); })();
+          return '';
+        }
+        case 'hud': {
+          const sub = (parts[2] || '').toLowerCase();
+          const settingsRoot = window.extension_settings || (window.SillyTavern?.getContext?.().extensionSettings);
+          if (!settingsRoot) { this.sendToChat('❌ Extension settings unavailable'); return ''; }
+          settingsRoot[extensionName] = settingsRoot[extensionName] || structuredClone(defaultSettings);
+          const cfg = settingsRoot[extensionName];
+          cfg.hud = cfg.hud || structuredClone(defaultSettings.hud);
+          cfg.ui = cfg.ui || structuredClone(defaultSettings.ui);
+          cfg.budget = cfg.budget || structuredClone(defaultSettings.budget);
+          cfg.budget.components = cfg.budget.components || structuredClone(defaultSettings.budget.components);
+          cfg.budget.components.hud = cfg.budget.components.hud || structuredClone(defaultSettings.budget.components.hud);
+          const saveSettings = () => { try { const ctx = window.SillyTavern?.getContext?.(); (ctx?.saveSettingsDebounced || window.saveSettingsDebounced)?.(); } catch {} };
+          const showStatus = () => {
+            const panel = cfg.hud.panel || {};
+            const prompt = cfg.hud.prompt || {};
+            const text = cfg.hud.text || {};
+            const alerts = cfg.hud.alerts || {};
+            const hudState = STRESHud.getHudState?.();
+            const count = Array.isArray(hudState?.fields) ? hudState.fields.length : 0;
+            const percent = alerts.relativeThreshold != null ? Math.round((alerts.relativeThreshold || 0) * 100) : Math.round(defaultSettings.hud.alerts.relativeThreshold * 100);
+            this.sendToChat(`**HUD**\n• Panel: ${(panel.enabled === false ? 'off' : 'on')} (${panel.position || 'right'})\n• Prompt: ${(prompt.enabled === false ? 'off' : `on (max ${cfg.budget.components.hud.maxTokens || 0})`)}\n• Text: ${(text.enabled === false || text.mode === 'off') ? 'off' : `${text.mode}`}\n• Alerts: ${(alerts.enabled === false ? 'off' : `on (Δ≥${alerts.absoluteThreshold ?? defaultSettings.hud.alerts.absoluteThreshold}, ≥${percent}% )`)}\n• Tracked fields: ${count}`);
+          };
+
+          const ensureHudState = () => { try { const meta = STRESHud.getHudState?.(); if (meta) meta.hasUnbroadcastChanges = true; } catch {} };
+
+          if (!sub || sub === 'status') { showStatus(); return ''; }
+          if (sub === 'show') { (async()=>{ await STRESHud.postSnapshot({ prefix: '📊 Player Sheet' }); })(); return ''; }
+          if (sub === 'panel') {
+            const arg = (parts[3] || '').toLowerCase();
+            if (arg === 'position') {
+              const pos = (parts[4] || '').toLowerCase();
+              if (!['left','right'].includes(pos)) { this.sendToChat('Usage: /stres hud panel position <left|right>'); return ''; }
+              cfg.hud.panel = cfg.hud.panel || {};
+              cfg.hud.panel.position = pos;
+              cfg.ui.panelPosition = pos;
+              saveSettings();
+              STRESHud.renderPanel?.();
+              this.sendToChat(`✅ HUD panel moved to ${pos}`);
+              return '';
+            }
+            if (!['on','off'].includes(arg)) { this.sendToChat('Usage: /stres hud panel <on|off|position <left|right>>'); return ''; }
+            cfg.hud.panel = cfg.hud.panel || {};
+            cfg.hud.panel.enabled = (arg === 'on');
+            if (arg === 'on') cfg.ui.showHUD = true;
+            saveSettings();
+            STRESHud.renderPanel?.();
+            this.sendToChat(`✅ HUD panel ${arg}`);
+            return '';
+          }
+          if (sub === 'collapse') {
+            const arg = (parts[3] || '').toLowerCase();
+            if (!['on','off'].includes(arg)) { this.sendToChat('Usage: /stres hud collapse <on|off>'); return ''; }
+            cfg.hud.panel = cfg.hud.panel || {};
+            cfg.hud.panel.collapsed = (arg === 'on');
+            cfg.ui.hudPanelCollapsed = cfg.hud.panel.collapsed;
+            saveSettings();
+            STRESHud.renderPanel?.();
+            this.sendToChat(`✅ HUD panel collapse ${arg}`);
+            return '';
+          }
+          if (sub === 'prompt') {
+            const arg = (parts[3] || '').toLowerCase();
+            if (!['on','off'].includes(arg)) { this.sendToChat('Usage: /stres hud prompt <on|off>'); return ''; }
+            cfg.hud.prompt = cfg.hud.prompt || {};
+            cfg.hud.prompt.enabled = (arg === 'on');
+            cfg.budget.components.hud.enabled = cfg.hud.prompt.enabled;
+            saveSettings();
+            STRESHud.refreshHudInPrompt?.();
+            this.sendToChat(`✅ HUD prompt ${arg}`);
+            return '';
+          }
+          if (sub === 'tokens') {
+            const value = Number(parts[3] || '0');
+            if (!Number.isFinite(value) || value <= 0) { this.sendToChat('Usage: /stres hud tokens <positive number>'); return ''; }
+            cfg.budget.components.hud = cfg.budget.components.hud || {};
+            cfg.budget.components.hud.maxTokens = Math.floor(value);
+            saveSettings();
+            STRESHud.refreshHudInPrompt?.();
+            this.sendToChat(`✅ HUD prompt cap set to ${Math.floor(value)}`);
+            return '';
+          }
+          if (sub === 'text') {
+            const mode = (parts[3] || '').toLowerCase();
+            if (!['off','on','on_change','each_message'].includes(mode)) { this.sendToChat('Usage: /stres hud text <off|on_change|each_message>'); return ''; }
+            cfg.hud.text = cfg.hud.text || structuredClone(defaultSettings.hud.text);
+            if (mode === 'off') { cfg.hud.text.enabled = false; cfg.hud.text.mode = 'off'; }
+            else {
+              cfg.hud.text.enabled = true;
+              cfg.hud.text.mode = mode === 'on' ? 'on_change' : mode;
+            }
+            saveSettings();
+            ensureHudState();
+            STRESHud.maybeBroadcast?.('command', { force: true });
+            this.sendToChat(`✅ HUD text mode set to ${cfg.hud.text.enabled ? cfg.hud.text.mode : 'off'}`);
+            return '';
+          }
+          if (sub === 'prefix') {
+            const prefix = parts.slice(3).join(' ').trim();
+            if (!prefix) { this.sendToChat('Usage: /stres hud prefix <text>'); return ''; }
+            cfg.hud.text = cfg.hud.text || structuredClone(defaultSettings.hud.text);
+            cfg.hud.text.prefix = prefix;
+            saveSettings();
+            this.sendToChat('✅ HUD text prefix updated');
+            return '';
+          }
+          if (sub === 'alerts') {
+            const action = (parts[3] || '').toLowerCase();
+            cfg.hud.alerts = cfg.hud.alerts || structuredClone(defaultSettings.hud.alerts);
+            if (action === 'on' || action === 'off') {
+              cfg.hud.alerts.enabled = (action === 'on');
+              saveSettings();
+              this.sendToChat(`✅ HUD alerts ${action}`);
+              return '';
+            }
+            if (action === 'increase') {
+              const v = (parts[4] || '').toLowerCase();
+              if (!['on','off'].includes(v)) { this.sendToChat('Usage: /stres hud alerts increase <on|off>'); return ''; }
+              cfg.hud.alerts.notifyIncrease = (v === 'on');
+              saveSettings();
+              this.sendToChat(`✅ Alert on increase ${v}`);
+              return '';
+            }
+            if (action === 'decrease') {
+              const v = (parts[4] || '').toLowerCase();
+              if (!['on','off'].includes(v)) { this.sendToChat('Usage: /stres hud alerts decrease <on|off>'); return ''; }
+              cfg.hud.alerts.notifyDecrease = (v === 'on');
+              saveSettings();
+              this.sendToChat(`✅ Alert on decrease ${v}`);
+              return '';
+            }
+            if (action === 'threshold') {
+              const amt = Number(parts[4] || '0');
+              if (!Number.isFinite(amt) || amt < 0) { this.sendToChat('Usage: /stres hud alerts threshold <number>'); return ''; }
+              cfg.hud.alerts.absoluteThreshold = Math.floor(amt);
+              saveSettings();
+              this.sendToChat(`✅ Alert delta threshold set to ${Math.floor(amt)}`);
+              return '';
+            }
+            if (action === 'percent') {
+              const pct = Number(parts[4] || '0');
+              if (!Number.isFinite(pct) || pct < 0) { this.sendToChat('Usage: /stres hud alerts percent <0-100>'); return ''; }
+              cfg.hud.alerts.relativeThreshold = Math.max(0, pct) / 100;
+              saveSettings();
+              this.sendToChat(`✅ Alert percent threshold set to ${Math.max(0, pct)}%`);
+              return '';
+            }
+            this.sendToChat('Usage: /stres hud alerts <on|off|increase <on|off>|decrease <on|off>|threshold <n>|percent <n>>');
+            return '';
+          }
+          this.sendToChat('Usage: /stres hud [status|show|panel <on|off|position <left|right>>|collapse <on|off>|prompt <on|off>|tokens <n>|text <off|on_change|each_message>|prefix <text>|alerts ...]');
           return '';
         }
         case 'onboard': {
@@ -2318,6 +3419,41 @@ const STRESChat = {
           this.sendToChat('Usage: /stres worldpack [status|load <packId>]');
           return '';
         }
+        case 'narrate': {
+          const promptText = parts.slice(2).join(' ').trim();
+          if (!promptText) { this.sendToChat('Usage: /stres narrate <prompt>'); return ''; }
+          (async () => {
+            try {
+              const result = await STRESRouting.dispatch({ intent: 'story', userPrompt: promptText, metadata: { command: 'narrate' } });
+              if (!result?.ok) {
+                const reason = result?.diagnostics?.error ? `: ${result.diagnostics.error}` : '';
+                this.sendToChat(`❌ Narrate failed${reason}`);
+                return;
+              }
+              const segments = Array.isArray(result.segments) && result.segments.length
+                ? result.segments
+                : [{ text: result.text, actorName: 'Narrator', actorId: 'narrator' }];
+              for (const segment of segments) {
+                if (!segment?.text) continue;
+              const extra = {
+                api: 'stres',
+                model: result.route?.targetModel || 'stres-narrator',
+                targetModel: result.route?.targetModel || 'stres-narrator',
+                usedModel: result.route?.targetModel || null,
+                dispatchId: result.dispatchId,
+                routingSource: result.source || 'fallback',
+                routeIntent: result.route?.intent || 'story',
+                actorId: segment.actorId || 'narrator',
+                destinationKey: 'orchestrator'
+              };
+                await this.addAssistantMessage(segment.actorName || 'Narrator', segment.text, { extra });
+              }
+            } catch (e) {
+              this.sendToChat('❌ Narrate error: ' + (e?.message || e));
+            }
+          })();
+          return '';
+        }
         case 'npc': {
           const sub = (parts[2]||'').toLowerCase();
           if (sub === 'say' || sub === 'reply') {
@@ -2329,11 +3465,32 @@ const STRESChat = {
             }
             (async()=>{
               try {
-                const text = await STRESCombat.npcReply(npcId, cue);
-                if (!text) { this.sendToChat('❌ NPC reply failed'); return; }
+                const result = await STRESCombat.npcReply(npcId, cue);
+                if (!result?.ok) {
+                  const reason = result?.error ? `: ${result.error}` : '';
+                  this.sendToChat(`❌ NPC reply failed${reason}`);
+                  return;
+                }
                 const reg = await STRESNPC.ensureRegistry();
-                const npc = reg?.[npcId] || { name: npcId };
-                await this.addAssistantMessage(npc.name || npcId, text);
+                const npc = reg?.[npcId] || { id: npcId, name: npcId };
+                const segments = Array.isArray(result.segments) && result.segments.length
+                  ? result.segments
+                  : [{ text: result.text, actorId: npcId, actorName: npc.name || npcId }];
+                for (const segment of segments) {
+                  if (!segment?.text) continue;
+                  const extra = {
+                    api: 'stres',
+                    model: result.route?.targetModel || 'stres-npc',
+                    targetModel: result.route?.targetModel || 'stres-npc',
+                    usedModel: result.route?.targetModel || null,
+                    dispatchId: result.dispatchId,
+                    routingSource: result.source || 'fallback',
+                    routeIntent: result.route?.intent || 'npc',
+                    actorId: segment.actorId || npcId,
+                    destinationKey: 'orchestrator'
+                  };
+                  await this.addAssistantMessage(segment.actorName || npc.name || npcId, segment.text, { extra });
+                }
               } catch(e) { this.sendToChat('❌ NPC reply error: ' + (e?.message||e)); }
             })();
             return '';
@@ -2373,6 +3530,139 @@ const STRESChat = {
             return '';
           }
           this.sendToChat('Usage: /stres budget | /stres budget profile <Lean|Balanced|Rich> | /stres budget set <context|cushion|reserve|header|primer> <number>');
+          return '';
+        }
+        case 'prompt': {
+          const sub = (parts[2] || '').toLowerCase();
+          const listDestinations = () => {
+            try {
+              const entries = STRESDestinations.list();
+              if (!entries.length) {
+                this.sendToChat('No prompt destinations configured.');
+                return;
+              }
+              const def = STRESDestinations.getDefaultKey();
+              const lines = entries.map((entry) => {
+                const label = entry.label || entry.key;
+                const mode = entry.mode || 'plan';
+                const marker = entry.key === def ? '⭐️' : '•';
+                const target = entry.targetModel ? ` → ${entry.targetModel}` : '';
+                return `${marker} ${entry.key} — ${label} (${mode}${target})`;
+              });
+              this.sendToChat(['**Prompt Destinations**', ...lines].join('\n'));
+            } catch (error) {
+              this.sendToChat(`❌ Failed to list destinations: ${error?.message || error}`);
+            }
+          };
+
+          if (!sub || sub === 'help') {
+            this.sendToChat('Usage: /stres prompt destinations | /stres prompt default <key> | /stres prompt send [key] <prompt>');
+            return '';
+          }
+
+          if (sub === 'destinations' || sub === 'list') {
+            listDestinations();
+            return '';
+          }
+
+          if (sub === 'default') {
+            const key = (parts[3] || '').trim();
+            if (!key) {
+              this.sendToChat('Usage: /stres prompt default <key>');
+              return '';
+            }
+            if (STRESDestinations.setDefault(key)) {
+              this.sendToChat(`✅ Default prompt destination set to ${key}`);
+            } else {
+              this.sendToChat(`❌ Unknown destination: ${key}`);
+            }
+            return '';
+          }
+
+          if (sub === 'send') {
+            const entries = STRESDestinations.list();
+            const availableKeys = new Set(entries.map((e) => e.key));
+            let promptParts = parts.slice(3);
+            if (!promptParts.length) {
+              this.sendToChat('Usage: /stres prompt send [key] <prompt>');
+              return '';
+            }
+            let destinationKey = STRESDestinations.getDefaultKey();
+            if (availableKeys.has(promptParts[0])) {
+              destinationKey = promptParts[0];
+              promptParts = promptParts.slice(1);
+            }
+            const promptText = promptParts.join(' ').trim();
+            if (!promptText) {
+              this.sendToChat('Usage: /stres prompt send [key] <prompt>');
+              return '';
+            }
+            const destMeta = STRESDestinations.get(destinationKey);
+            (async () => {
+              try {
+                const result = await STRESDestinations.send({ key: destinationKey, prompt: promptText });
+                if (!result || !result.ok) {
+                  const reason = result?.error ? `: ${result.error}` : '';
+                  this.sendToChat(`❌ Prompt dispatch failed${reason}`);
+                  return;
+                }
+                const segments = Array.isArray(result.segments) && result.segments.length
+                  ? result.segments
+                  : [{ text: result.text, actorName: destMeta?.actorName || 'Narrator' }];
+                for (const segment of segments) {
+                  if (!segment?.text) continue;
+                  const actorName = segment.actorName || destMeta?.actorName || 'Narrator';
+                  const targetModel = result.targetModel || result.route?.targetModel || destMeta?.targetModel || null;
+                  const extra = {
+                    api: 'stres',
+                    model: targetModel || 'stres-narrator',
+                    targetModel: targetModel || 'stres-narrator',
+                    usedModel: targetModel || null,
+                    dispatchId: result.dispatchId || result.route?.dispatchId || null,
+                    routingSource: result.source || 'direct',
+                    routeIntent: result.route?.intent || destMeta?.intent || 'story',
+                    actorId: segment.actorId || null,
+                    destinationKey
+                  };
+                  await this.addAssistantMessage(actorName, segment.text, { extra });
+                  try {
+                    await window.STRESTelemetry?.recordComponent?.('Prompt', segment.text, {
+                      key: 'STRES_PROMPT_RESULT',
+                      targetModel: targetModel || null,
+                      destination: destinationKey
+                    });
+                  } catch {}
+                }
+                if ((result.source || '') === 'direct') {
+                  try {
+                    const ctx = window.SillyTavern?.getContext?.();
+                    const meta = ctx?.chatMetadata || (ctx.chatMetadata = {});
+                    meta.stres = meta.stres || {};
+                    meta.stres.lastDispatch = {
+                      intent: destMeta?.intent || 'story',
+                      route: {
+                        intent: destMeta?.intent || 'story',
+                        targetModel: result.targetModel || destMeta?.targetModel || null,
+                        reason: 'direct'
+                      },
+                      dispatchId: result.dispatchId || null,
+                      destinationKey,
+                      timestamp: new Date().toISOString(),
+                      actorId: null,
+                      participants: [],
+                      scene: null
+                    };
+                    ctx?.saveMetadata?.();
+                  } catch {}
+                }
+              } catch (error) {
+                this.sendToChat('❌ Prompt send error: ' + (error?.message || error));
+              }
+            })();
+            return '';
+          }
+
+          this.sendToChat('Usage: /stres prompt destinations | /stres prompt default <key> | /stres prompt send [key] <prompt>');
           return '';
         }
         case 'start': {
@@ -2544,6 +3834,39 @@ const STRESChat = {
           const sub = (parts[2]||'').toLowerCase();
           const s = window.extension_settings?.[extensionName] || {};
           s.npc = s.npc || structuredClone(defaultSettings.npc);
+          if (sub === 'list') {
+            (async()=>{
+              try {
+                const campaignId = s.campaignId || window.extension_settings?.[extensionName]?.campaignId;
+                if (!campaignId) {
+                  this.sendToChat('No campaign bound to this chat yet. Run /stres begin apply first.');
+                  return;
+                }
+                const response = await state.stresClient.listNpcs(campaignId);
+                if (response?.success === false) {
+                  this.sendToChat(`❌ Failed to load NPCs: ${response.error || 'Unknown error'}`);
+                  return;
+                }
+                const data = response?.data || response;
+                const npcs = Array.isArray(data?.npcs) ? data.npcs : [];
+                if (!npcs.length) {
+                  this.sendToChat('No NPCs stored for this campaign yet.');
+                  return;
+                }
+                const lines = npcs.slice(0, 12).map((npc, idx) => {
+                  const name = npc.displayName || npc.name || npc.templateId || npc.id;
+                  const role = npc.role ? ` — ${npc.role}` : '';
+                  const variant = npc?.variant?.label || npc?.variant?.key || '';
+                  return `${idx + 1}. ${name}${role}${variant ? ` [${variant}]` : ''}`;
+                });
+                if (npcs.length > 12) lines.push(`…and ${npcs.length - 12} more`);
+                this.sendToChat(['**Campaign NPCs**', ...lines].join('\n'));
+              } catch (error) {
+                this.sendToChat(`❌ Failed to list NPCs: ${error?.message || error}`);
+              }
+            })();
+            return '';
+          }
           if (!sub || sub === 'status' || sub === 'show') {
             const present = Object.keys((window.SillyTavern?.getContext?.()?.chatMetadata?.stres?.npc?.presence)||{}).filter(k => (window.SillyTavern?.getContext?.()?.chatMetadata?.stres?.npc?.presence?.[k]?.inScene));
             this.sendToChat(`**NPC Memory**\n• Enabled: ${s.npc.enabled}\n• Inject: ${s.npc.inject}\n• topK: ${s.npc.topK} • maxTokens: ${s.npc.maxTokens} • maxNPCs: ${s.npc.maxNPCs}\n• Activation: ${s.npc.activation}\n• Present: ${present.join(', ')||'(none)'}`);
@@ -2587,7 +3910,7 @@ const STRESChat = {
           }
           if (sub === 'enter') { const id = parts.slice(3).join(' ').trim(); if (!id) { this.sendToChat('Usage: /stres npc enter <name|id>'); return ''; } STRESNPC.markEnter(id); this.sendToChat(`🚪 ${id} entered scene.`); return ''; }
           if (sub === 'leave') { const id = parts.slice(3).join(' ').trim(); if (!id) { this.sendToChat('Usage: /stres npc leave <name|id>'); return ''; } STRESNPC.markLeave(id); this.sendToChat(`🚪 ${id} left scene.`); return ''; }
-          this.sendToChat('Usage: /stres npc [status|on|off|inject on|off|topk N|max N|maxnpcs N|enter ID|leave ID]');
+          this.sendToChat('Usage: /stres npc [status|list|on|off|inject on|off|topk N|max N|maxnpcs N|enter ID|leave ID]');
           return '';
         }
         case 'setapi': {
@@ -2890,6 +4213,7 @@ const STRESChat = {
 • /stres worldpack load <id> - Load worldpack by ID
 • /stres scenarios - List worldpack-provided scenarios
 • /stres start <id|index> - Set scenario and region
+• /stres narrate <prompt> - Generate a narrator response via STRES routing
 • /stres where - Show current location/time/weather
 • /stres tick <duration> - Advance sim time (e.g., 2h, 30m)
 • /stres onboard - Post quick onboarding steps
@@ -2906,6 +4230,7 @@ const STRESChat = {
 • /stres set region <id> - Set region ID for sim
 • /stres set character <id> - Set character ID
 • /stres inject primer - Inject worldpack primer
+• /stres hud [status|panel|prompt|text|alerts] - Configure HUD panel, prompt injection, text mode, and alerts
 • /stres budget - Show token budgets and predicted use
 • /stres budget profile <Lean|Balanced|Rich> - Apply budget profile
 • /stres budget set <context|cushion|reserve|header|primer> <number> - Adjust limits
@@ -3157,6 +4482,12 @@ async function initializeExtension() {
   // Initialize NPC presence/memory
   try { STRESNPC.init(context); } catch {}
 
+  // Initialize routing manager for multi-LLM orchestration
+  try { STRESRouting.init(context); } catch {}
+
+  // Initialize prompt destinations manager
+  try { STRESDestinations.init(context); } catch {}
+
   // Initialize HUD snapshot injection
   try { STRESHud.init(context); } catch {}
 
@@ -3289,6 +4620,10 @@ function initializeUI() {
   const combatHost = doc.createElement('div');
   combatHost.id = 'stres-combat-host';
   root.appendChild(combatHost);
+
+  const hudHost = doc.createElement('div');
+  hudHost.id = 'stres-hud-host';
+  root.appendChild(hudHost);
 
   // Expose a minimal API to toggle settings (prefers tabbed panel)
   window.STRES = window.STRES || {};
@@ -3697,8 +5032,12 @@ function initializeUI() {
       hud.addEventListener('change', (ev)=>{
         const val = !!ev.target.checked;
         set(window.extension_settings[extensionName],'ui.showHUD', val);
+        set(window.extension_settings[extensionName],'hud.panel.enabled', val);
+        set(window.extension_settings[extensionName],'hud.prompt.enabled', val);
         set(window.extension_settings[extensionName],'budget.components.hud.enabled', val);
         save();
+        try { const meta = STRESHud.getHudState?.(); if (meta) meta.hasUnbroadcastChanges = true; } catch {}
+        STRESHud.renderPanel?.();
         STRESHud.refreshHudInPrompt?.();
       });
       body.append(
@@ -3749,18 +5088,105 @@ function initializeUI() {
     };
     const buildHud = ()=>{
       body.innerHTML='';
-      const enabled = mkCheck(get(s,'budget.components.hud.enabled', get(s,'ui.showHUD', true)));
-      enabled.addEventListener('change', (ev)=>{
+      const panelOn = mkCheck(get(s,'hud.panel.enabled', get(s,'ui.showHUD', true)));
+      panelOn.addEventListener('change', (ev)=>{
         const val = !!ev.target.checked;
+        set(window.extension_settings[extensionName],'hud.panel.enabled', val);
+        if (val) set(window.extension_settings[extensionName],'ui.showHUD', true);
+        save();
+        STRESHud.renderPanel?.();
+      });
+
+      const panelPos = mkSelect(get(s,'hud.panel.position', get(s,'ui.panelPosition','right')), [['left','Left'],['right','Right']]);
+      panelPos.addEventListener('change', (ev)=>{
+        set(window.extension_settings[extensionName],'hud.panel.position', ev.target.value);
+        set(window.extension_settings[extensionName],'ui.panelPosition', ev.target.value);
+        save();
+        STRESHud.renderPanel?.();
+      });
+
+      const panelCollapsed = mkCheck(get(s,'hud.panel.collapsed', get(s,'ui.hudPanelCollapsed', false)));
+      panelCollapsed.addEventListener('change', (ev)=>{
+        const val = !!ev.target.checked;
+        set(window.extension_settings[extensionName],'hud.panel.collapsed', val);
+        set(window.extension_settings[extensionName],'ui.hudPanelCollapsed', val);
+        save();
+        STRESHud.renderPanel?.();
+      });
+
+      const promptOn = mkCheck(get(s,'hud.prompt.enabled', get(s,'budget.components.hud.enabled', true)));
+      promptOn.addEventListener('change', (ev)=>{
+        const val = !!ev.target.checked;
+        set(window.extension_settings[extensionName],'hud.prompt.enabled', val);
         set(window.extension_settings[extensionName],'budget.components.hud.enabled', val);
         save();
         STRESHud.refreshHudInPrompt?.();
       });
-      const maxT = mkInput('number', get(s,'budget.components.hud.maxTokens',200), { min:40, step:10 });
-      maxT.addEventListener('change', onChange('budget.components.hud.maxTokens', Number, ()=>STRESHud.refreshHudInPrompt()));
+
+      const hudTokens = mkInput('number', get(s,'budget.components.hud.maxTokens',200), { min:40, step:10 });
+      hudTokens.addEventListener('change', onChange('budget.components.hud.maxTokens', Number, ()=>STRESHud.refreshHudInPrompt()));
+
+      const textEnabled = mkCheck(get(s,'hud.text.enabled', defaultSettings.hud.text.enabled));
+      textEnabled.addEventListener('change', (ev)=>{
+        const val = !!ev.target.checked;
+        set(window.extension_settings[extensionName],'hud.text.enabled', val);
+        save();
+        try { const meta = STRESHud.getHudState?.(); if (meta) meta.hasUnbroadcastChanges = true; } catch {}
+        STRESHud.maybeBroadcast?.('settings', { force: true });
+      });
+
+      const textMode = mkSelect(get(s,'hud.text.mode', defaultSettings.hud.text.mode), [['off','Off'],['on_change','On change'],['each_message','Each message']]);
+      textMode.addEventListener('change', (ev)=>{
+        set(window.extension_settings[extensionName],'hud.text.mode', ev.target.value);
+        save();
+        try { const meta = STRESHud.getHudState?.(); if (meta) meta.hasUnbroadcastChanges = true; } catch {}
+      });
+
+      const textPrefix = mkInput('text', get(s,'hud.text.prefix', defaultSettings.hud.text.prefix), { placeholder: '📊 Player Sheet' });
+      textPrefix.addEventListener('change', onChange('hud.text.prefix', String));
+
+      const alertsOn = mkCheck(get(s,'hud.alerts.enabled', defaultSettings.hud.alerts.enabled));
+      alertsOn.addEventListener('change', (ev)=>{
+        set(window.extension_settings[extensionName],'hud.alerts.enabled', !!ev.target.checked);
+        save();
+      });
+
+      const alertsIncrease = mkCheck(get(s,'hud.alerts.notifyIncrease', defaultSettings.hud.alerts.notifyIncrease));
+      alertsIncrease.addEventListener('change', (ev)=>{
+        set(window.extension_settings[extensionName],'hud.alerts.notifyIncrease', !!ev.target.checked);
+        save();
+      });
+
+      const alertsDecrease = mkCheck(get(s,'hud.alerts.notifyDecrease', defaultSettings.hud.alerts.notifyDecrease));
+      alertsDecrease.addEventListener('change', (ev)=>{
+        set(window.extension_settings[extensionName],'hud.alerts.notifyDecrease', !!ev.target.checked);
+        save();
+      });
+
+      const alertAbs = mkInput('number', get(s,'hud.alerts.absoluteThreshold', defaultSettings.hud.alerts.absoluteThreshold), { min:0, step:1 });
+      alertAbs.addEventListener('change', onChange('hud.alerts.absoluteThreshold', Number));
+
+      const alertRel = mkInput('number', Math.round((get(s,'hud.alerts.relativeThreshold', defaultSettings.hud.alerts.relativeThreshold) || 0) * 100), { min:0, max:100, step:5 });
+      alertRel.addEventListener('change', (ev)=>{
+        const val = Math.max(0, Number(ev.target.value || 0)) / 100;
+        set(window.extension_settings[extensionName],'hud.alerts.relativeThreshold', val);
+        save();
+      });
+
       body.append(
-        row('Enable HUD Prompt', enabled, 'Allow STRES to inject player stats into the chat prompt'),
-        row('HUD max tokens', maxT)
+        row('Panel visible', panelOn, 'Show floating HUD panel inside SillyTavern'),
+        row('Panel position', panelPos),
+        row('Panel collapsed', panelCollapsed, 'Collapse the HUD panel by default'),
+        row('Prompt injection', promptOn, 'Send HUD stats to the LLM prompt (token budget applies)'),
+        row('HUD max tokens', hudTokens),
+        row('Text broadcast', textEnabled, 'Emit HUD snapshot as chat text'),
+        row('Text mode', textMode, 'on_change – when stats change • each_message – after every exchange'),
+        row('Text prefix', textPrefix),
+        row('Alerts enabled', alertsOn, 'Send chat alerts when tracked stats change significantly'),
+        row('Alert on increase', alertsIncrease),
+        row('Alert on decrease', alertsDecrease),
+        row('Alert delta ≥', alertAbs, 'Absolute change threshold before alert triggers'),
+        row('Alert percent ≥', alertRel, 'Percentage change threshold (0 disables)')
       );
     };
     const buildRag = ()=>{

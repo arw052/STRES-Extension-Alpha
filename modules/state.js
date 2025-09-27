@@ -10,6 +10,9 @@ export const state = {
   characterCardManager: null,
   worldMapViewer: null,
   scenarioReducer: null,
+  routingManager: null,
+  npcDirectory: null,
+  destinations: null,
 };
 
 export const setState = (key, value) => {
