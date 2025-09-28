@@ -110,13 +110,13 @@ const STRESNarrator = {
     this.maybeOnboard().catch(()=>{});
   },
   getMeta() {
-    const ctx = this.ctx || window.SillyTavern?.getContext?.();
+    const ctx = window.SillyTavern?.getContext?.() || this.ctx || {};
     const meta = ctx?.chatMetadata || (ctx.chatMetadata = {});
     meta.stres = meta.stres || {};
     return meta;
   },
   async readCharacterField(cid, key) {
-    const ctx = this.ctx || window.SillyTavern?.getContext?.();
+    const ctx = window.SillyTavern?.getContext?.() || this.ctx || {};
     try {
       const reader = ctx?.readExtensionField || globalThis.readExtensionField;
       if (typeof reader === 'function') return await reader(cid, key);
@@ -127,8 +127,8 @@ const STRESNarrator = {
   },
   async applyCharacterConfig() {
     try {
-      const ctx = this.ctx || window.SillyTavern?.getContext?.();
-      const cid = ctx?.characterId; if (!cid) return false;
+    const ctx = window.SillyTavern?.getContext?.() || this.ctx || {};
+    const cid = ctx?.characterId || ctx?.selectedCharacterId; if (!cid) return false;
       const cfg = await this.readCharacterField(cid, 'stres');
       const depth = await this.readCharacterField(cid, 'depth_prompt');
       if (!cfg && !depth) return false;
@@ -215,8 +215,8 @@ const STRESNarrator = {
   },
   async bindToCurrentCharacter() {
     try {
-      const ctx = this.ctx || window.SillyTavern?.getContext?.();
-      const cid = ctx?.characterId;
+      const ctx = window.SillyTavern?.getContext?.() || this.ctx || {};
+      const cid = ctx?.characterId || ctx?.selectedCharacterId;
       if (!cid) return { ok:false, error: 'No active character' };
       const writer = ctx?.writeExtensionField || globalThis.writeExtensionField;
       if (typeof writer !== 'function') return { ok:false, error: 'writeExtensionField unavailable' };
@@ -228,8 +228,8 @@ const STRESNarrator = {
   },
   async setDepthPrompt(text) {
     try {
-      const ctx = this.ctx || window.SillyTavern?.getContext?.();
-      const cid = ctx?.characterId;
+      const ctx = window.SillyTavern?.getContext?.() || this.ctx || {};
+      const cid = ctx?.characterId || ctx?.selectedCharacterId;
       if (!cid) return { ok:false, error: 'No active character' };
       const writer = ctx?.writeExtensionField || globalThis.writeExtensionField;
       if (typeof writer !== 'function') return { ok:false, error: 'writeExtensionField unavailable' };
@@ -240,7 +240,7 @@ const STRESNarrator = {
   },
   async showStatus() {
     try {
-      const ctx = this.ctx || window.SillyTavern?.getContext?.();
+      const ctx = window.SillyTavern?.getContext?.() || this.ctx || {};
       const cid = ctx?.characterId;
       const name = ctx?.characters?.[cid]?.name || '(unknown)';
       STRESChat.sendToChat(`**Narrator**\n• Active Character: ${name} (${cid||'n/a'})\n• Onboarded: ${!!this.getMeta()?.stres?.onboarded}`);
