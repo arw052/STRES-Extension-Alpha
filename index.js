@@ -2990,8 +2990,9 @@ const STRESChat = {
   },
 
   handleInventoryCommand(command) {
-    const parts = command.split(' ');
-    const action = parts[1];
+    const normalized = typeof command === 'string' ? command.trim() : '';
+    const parts = normalized ? normalized.split(/\s+/) : [];
+    const action = parts.length > 1 ? parts[1].toLowerCase() : '';
 
     switch(action) {
       case 'show':
@@ -3016,8 +3017,13 @@ const STRESChat = {
 
   handleStresCommand(command) {
     try {
-      const parts = command.split(' ');
-      const action = parts && parts.length > 1 ? parts[1] : '';
+      const normalized = typeof command === 'string' ? command.trim() : '';
+      if (!normalized) {
+        this.showHelp();
+        return '';
+      }
+      const parts = normalized.split(/\s+/);
+      const action = parts.length > 1 ? (parts[1] || '').toLowerCase() : '';
 
       switch(action) {
         case 'status':
@@ -4322,8 +4328,9 @@ const STRESChat = {
   },
 
   handleCombatCommand(command) {
-    const parts = command.split(' ');
-    const subcommand = parts[1];
+    const normalized = typeof command === 'string' ? command.trim() : '';
+    const parts = normalized ? normalized.split(/\s+/) : [];
+    const subcommand = parts.length > 1 ? parts[1].toLowerCase() : '';
 
     switch(subcommand) {
       case 'act':
