@@ -149,7 +149,9 @@ const STRESNarrator = {
   async applyCharacterConfig() {
     try {
     const ctx = window.SillyTavern?.getContext?.() || this.ctx || {};
-    const cid = ctx?.characterId || ctx?.selectedCharacterId; if (!cid) return false;
+    const rawId = ctx?.characterId ?? ctx?.selectedCharacterId;
+    if (rawId == null) return false;
+    const cid = rawId;
       const cfg = await this.readCharacterField(cid, 'stres');
       const depth = await this.readCharacterField(cid, 'depth_prompt');
       if (!cfg && !depth) return false;
@@ -236,9 +238,10 @@ const STRESNarrator = {
   },
   async bindToCurrentCharacter() {
     try {
-      const ctx = window.SillyTavern?.getContext?.() || this.ctx || {};
-      const cid = ctx?.characterId || ctx?.selectedCharacterId;
-      if (!cid) return { ok:false, error: 'No active character' };
+    const ctx = window.SillyTavern?.getContext?.() || this.ctx || {};
+    const rawId = ctx?.characterId ?? ctx?.selectedCharacterId;
+    if (rawId == null) return { ok:false, error: 'No active character' };
+    const cid = rawId;
       const writer = ctx?.writeExtensionField || globalThis.writeExtensionField;
       if (typeof writer !== 'function') return { ok:false, error: 'writeExtensionField unavailable' };
       // Write portable STRES config
@@ -249,9 +252,10 @@ const STRESNarrator = {
   },
   async setDepthPrompt(text) {
     try {
-      const ctx = window.SillyTavern?.getContext?.() || this.ctx || {};
-      const cid = ctx?.characterId || ctx?.selectedCharacterId;
-      if (!cid) return { ok:false, error: 'No active character' };
+    const ctx = window.SillyTavern?.getContext?.() || this.ctx || {};
+    const rawId = ctx?.characterId ?? ctx?.selectedCharacterId;
+    if (rawId == null) return { ok:false, error: 'No active character' };
+    const cid = rawId;
       const writer = ctx?.writeExtensionField || globalThis.writeExtensionField;
       if (typeof writer !== 'function') return { ok:false, error: 'writeExtensionField unavailable' };
       const val = String(text || this.defaultDepthPrompt());

@@ -104,11 +104,12 @@ export function createOnboarding({ STRESNarrator, STRESChat }) {
         this.cache = null;
         return null;
       }
-      const characterId = ctx.characterId || ctx.selectedCharacterId;
-      if (!characterId) {
+      const rawId = ctx.characterId ?? ctx.selectedCharacterId;
+      if (rawId == null) {
         this.cache = null;
         return null;
       }
+      const characterId = rawId;
       const character = ctx.characters?.[characterId] || {};
       const sources = [];
       const normalizedPieces = [];
