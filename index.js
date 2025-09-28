@@ -3024,7 +3024,7 @@ const STRESChat = {
       }
       const parts = normalized.split(/\s+/);
       const action = parts.length > 1 ? (parts[1] || '').toLowerCase() : '';
-      console.debug('[STRES] handleStresCommand', { command: normalized, parts, action });
+      console.log('[STRES] handleStresCommand', { command: normalized, parts, action });
 
       switch(action) {
         case 'status':
