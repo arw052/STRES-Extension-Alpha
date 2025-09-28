@@ -122,7 +122,15 @@ const STRESNarrator = {
       const reader = ctx?.readExtensionField || globalThis.readExtensionField;
       if (typeof reader === 'function') candidates.push(await reader(cid, key));
     } catch {}
-    try { const ch = ctx?.characters?.[cid]; if (ch?.extensions && key in ch.extensions) candidates.push(ch.extensions[key]); } catch {}
+    try {
+      const ch = ctx?.characters?.[cid];
+      if (ch?.extensions && key in ch.extensions) candidates.push(ch.extensions[key]);
+    } catch {}
+    try {
+      const ch = ctx?.characters?.[cid];
+      const dataExt = ch?.data?.extensions;
+      if (dataExt && key in dataExt) candidates.push(dataExt[key]);
+    } catch {}
     try { const ch = ctx?.characters?.[cid]; if (ch && key in ch) candidates.push(ch[key]); } catch {}
     for (const value of candidates) {
       if (value == null) continue;
