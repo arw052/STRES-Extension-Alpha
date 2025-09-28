@@ -1098,7 +1098,9 @@ const STRESNPC = {
     } catch { return ''; }
   },
 
-  escapeReg(s) { return String(s||'').replace(/[.*+?^${}()|[\]\\]/g, '\\$&'); }
+  escapeReg: function(s) {
+    return String(s || '').replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+  },
 
   buildRegistryFromBackend(npcs) {
     const registry = {};
