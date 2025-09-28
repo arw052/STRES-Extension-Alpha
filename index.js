@@ -117,12 +117,25 @@ const STRESNarrator = {
   },
   async readCharacterField(cid, key) {
     const ctx = window.SillyTavern?.getContext?.() || this.ctx || {};
+    const candidates = [];
     try {
       const reader = ctx?.readExtensionField || globalThis.readExtensionField;
-      if (typeof reader === 'function') return await reader(cid, key);
+      if (typeof reader === 'function') candidates.push(await reader(cid, key));
     } catch {}
-    try { const ch = ctx?.characters?.[cid]; if (ch?.extensions && key in ch.extensions) return ch.extensions[key]; } catch {}
-    try { const ch = ctx?.characters?.[cid]; if (ch && key in ch) return ch[key]; } catch {}
+    try { const ch = ctx?.characters?.[cid]; if (ch?.extensions && key in ch.extensions) candidates.push(ch.extensions[key]); } catch {}
+    try { const ch = ctx?.characters?.[cid]; if (ch && key in ch) candidates.push(ch[key]); } catch {}
+    for (const value of candidates) {
+      if (value == null) continue;
+      if (typeof value === 'string') {
+        const trimmed = value.trim();
+        if (trimmed.startsWith('{') || trimmed.startsWith('[')) {
+          try { return JSON.parse(trimmed); } catch {}
+        }
+        if (trimmed.length) return trimmed;
+        continue;
+      }
+      return value;
+    }
     return undefined;
   },
   async applyCharacterConfig() {
