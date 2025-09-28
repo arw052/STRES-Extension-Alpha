@@ -56,7 +56,11 @@ export function createOnboarding({ STRESNarrator, STRESChat }) {
       return null;
     },
     getContext() {
-      this.ctx = this.ctx || window.SillyTavern?.getContext?.() || null;
+      const live = window.SillyTavern?.getContext?.();
+      if (live) {
+        this.ctx = live;
+        return live;
+      }
       return this.ctx;
     },
     getChatMeta() {
