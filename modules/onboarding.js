@@ -108,13 +108,22 @@ export function createOnboarding({ STRESNarrator, STRESChat }) {
         this.cache = null;
         return null;
       }
-      const rawId = ctx.characterId ?? ctx.selectedCharacterId;
-      if (rawId == null) {
+      let rawId = ctx.characterId ?? ctx.selectedCharacterId;
+      if (rawId == null || rawId === '') {
+        if (ctx.this_chid != null) {
+          rawId = ctx.this_chid;
+        } else if (ctx.selected_group == null && ctx.characters && typeof ctx.characters === 'object') {
+          const keys = Object.keys(ctx.characters);
+          if (keys.length === 1) rawId = keys[0];
+        }
+      }
+      if (rawId == null || rawId === '') {
         this.cache = null;
         return null;
       }
-      const characterId = rawId;
-      const character = ctx.characters?.[characterId] || {};
+      const characterKey = typeof rawId === 'number' ? rawId : String(rawId);
+      const character = ctx.characters?.[characterKey] || ctx.characters?.[Number(characterKey)] || {};
+      const characterId = characterKey;
       const sources = [];
       const normalizedPieces = [];
       const keyList = (value) => (value && typeof value === 'object') ? Object.keys(value) : [];

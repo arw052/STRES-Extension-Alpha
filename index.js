@@ -188,7 +188,10 @@ const STRESNarrator = {
       // Apply runtime effects
       try {
         if (s[extensionName].worldpackId) {
-          await state.stresClient.loadWorldpackById(s[extensionName].worldpackId).catch(()=>{});
+          const current = await state.stresClient.getCurrentWorldpack?.().catch(()=>null);
+          if (!current || current.id !== s[extensionName].worldpackId) {
+            await state.stresClient.loadWorldpackById(s[extensionName].worldpackId).catch(()=>{});
+          }
         }
         await STRESPrompts.refreshSceneHeaderInPrompt();
       } catch {}
@@ -4504,7 +4507,10 @@ async function initializeExtension() {
   try {
     const s = window.extension_settings[extensionName];
     if (s.worldpackId) {
-      state.stresClient.loadWorldpackById(s.worldpackId).catch(()=>{});
+      const current = await state.stresClient.getCurrentWorldpack?.().catch(()=>null);
+      if (!current || current.id !== s.worldpackId) {
+        state.stresClient.loadWorldpackById(s.worldpackId).catch(()=>{});
+      }
       try { const ai = s.autoInjection; if (ai?.enabled && ai?.primer) { setTimeout(()=>{ STRESChat.injectWorldpackPrimer().catch(()=>{}); }, 200); } } catch {}
     }
   } catch {}
