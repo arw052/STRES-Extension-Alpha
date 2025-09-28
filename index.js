@@ -4549,6 +4549,19 @@ function registerSlashCommands(context) {
   const registerSlashCommand = context.registerSlashCommand || window.registerSlashCommand;
   const SlashCommandParser = context.SlashCommandParser || window.SlashCommandParser;
   const SlashCommand = context.SlashCommand || window.SlashCommand;
+  const joinUnnamedArgs = (value) => {
+    if (Array.isArray(value)) {
+      return value
+        .flat()
+        .map((item) => typeof item === 'string' ? item : '')
+        .join(' ')
+        .trim();
+    }
+    if (typeof value === 'string') {
+      return value.trim();
+    }
+    return '';
+  };
 
   if (typeof SlashCommandParser !== 'undefined' && typeof SlashCommand !== 'undefined') {
     console.log("[STRES] Using modern SlashCommandParser method");
@@ -4556,9 +4569,11 @@ function registerSlashCommands(context) {
     // Register all STRES commands
     SlashCommandParser.addCommandObject(SlashCommand.fromProps({
       name: 'stres',
-      callback: (args) => {
-        const argString = args && args.length > 0 ? args.join(' ') : '';
-        return STRESChat.handleStresCommand('/stres ' + argString);
+      splitUnnamedArgument: false,
+      callback: (_named, unnamed) => {
+        const argString = joinUnnamedArgs(unnamed);
+        const commandText = argString ? `/stres ${argString}` : '/stres';
+        return STRESChat.handleStresCommand(commandText);
       },
       helpString: 'STRES main commands - status, join, campaign, settings, reset, debug, fixport'
     }));
@@ -4571,13 +4586,21 @@ function registerSlashCommands(context) {
 
     SlashCommandParser.addCommandObject(SlashCommand.fromProps({
       name: 'inventory',
-      callback: (args) => STRESChat.handleInventoryCommand('/inventory ' + args.join(' ')),
+      splitUnnamedArgument: false,
+      callback: (_named, unnamed) => {
+        const argString = joinUnnamedArgs(unnamed);
+        return STRESChat.handleInventoryCommand(argString ? `/inventory ${argString}` : '/inventory');
+      },
       helpString: 'Inventory management - show, add, remove, use'
     }));
 
     SlashCommandParser.addCommandObject(SlashCommand.fromProps({
       name: 'combat',
-      callback: (args) => STRESChat.handleCombatCommand('/combat ' + args.join(' ')),
+      splitUnnamedArgument: false,
+      callback: (_named, unnamed) => {
+        const argString = joinUnnamedArgs(unnamed);
+        return STRESChat.handleCombatCommand(argString ? `/combat ${argString}` : '/combat');
+      },
       helpString: 'Combat commands - act, status'
     }));
 
