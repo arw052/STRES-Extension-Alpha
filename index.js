@@ -117,7 +117,10 @@ const STRESNarrator = {
   },
   async readCharacterField(cid, key) {
     const ctx = this.ctx || window.SillyTavern?.getContext?.();
-    try { if (ctx?.readExtensionField) return await ctx.readExtensionField(cid, key); } catch {}
+    try {
+      const reader = ctx?.readExtensionField || globalThis.readExtensionField;
+      if (typeof reader === 'function') return await reader(cid, key);
+    } catch {}
     try { const ch = ctx?.characters?.[cid]; if (ch?.extensions && key in ch.extensions) return ch.extensions[key]; } catch {}
     try { const ch = ctx?.characters?.[cid]; if (ch && key in ch) return ch[key]; } catch {}
     return undefined;
@@ -214,10 +217,12 @@ const STRESNarrator = {
     try {
       const ctx = this.ctx || window.SillyTavern?.getContext?.();
       const cid = ctx?.characterId;
-      if (!cid || !ctx?.writeExtensionField) return { ok:false, error: 'No active character' };
+      if (!cid) return { ok:false, error: 'No active character' };
+      const writer = ctx?.writeExtensionField || globalThis.writeExtensionField;
+      if (typeof writer !== 'function') return { ok:false, error: 'writeExtensionField unavailable' };
       // Write portable STRES config
       const cfg = this.buildPortableConfig();
-      await ctx.writeExtensionField(cid, 'stres', cfg);
+      await writer(cid, 'stres', cfg);
       return { ok:true, characterId: cid, stres: cfg };
     } catch (e) { return { ok:false, error: String(e?.message||e) }; }
   },
@@ -225,9 +230,11 @@ const STRESNarrator = {
     try {
       const ctx = this.ctx || window.SillyTavern?.getContext?.();
       const cid = ctx?.characterId;
-      if (!cid || !ctx?.writeExtensionField) return { ok:false, error: 'No active character' };
+      if (!cid) return { ok:false, error: 'No active character' };
+      const writer = ctx?.writeExtensionField || globalThis.writeExtensionField;
+      if (typeof writer !== 'function') return { ok:false, error: 'writeExtensionField unavailable' };
       const val = String(text || this.defaultDepthPrompt());
-      await ctx.writeExtensionField(cid, 'depth_prompt', val);
+      await writer(cid, 'depth_prompt', val);
       return { ok:true, characterId: cid };
     } catch (e) { return { ok:false, error: String(e?.message||e) }; }
   },
