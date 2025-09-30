@@ -128,6 +128,26 @@ async function stresHashString(text) {
   return Array.from(new Uint8Array(digest)).map((b) => b.toString(16).padStart(2, '0')).join('');
 }
 
+function stresAdoptServerUrl(settings) {
+  try {
+    if (!settings) return;
+    const href = window.location?.href;
+    if (!href) return;
+    const url = new URL(href);
+    const host = url.hostname;
+    if (!host || host === 'localhost' || host === '127.0.0.1') return;
+    const protocol = url.protocol || 'http:';
+    const current = (settings.serverUrl || '').replace(/\/$/, '') || defaultSettings.serverUrl;
+    const isDefault = !current || /^(http:\/\/)?(localhost|127\.0\.0\.1)(:3001)?$/i.test(current);
+    const isLoopback = /127\.0\.0\.1|localhost/.test(current);
+    if (!isDefault && !isLoopback) return;
+    const adopted = `${protocol}//${host}:3001`;
+    settings.serverUrl = adopted;
+    try { console.log('[STRES] Adopted server URL', adopted); } catch {}
+    try { (window.SillyTavern?.getContext?.().saveSettingsDebounced || window.saveSettingsDebounced)?.(); } catch {}
+  } catch {}
+}
+
 // Override/extend chat helpers for Phase 7 features
 try {
   // Assistant-style message injector (e.g., NPC replies)
@@ -4961,6 +4981,8 @@ async function initializeExtension() {
       context.saveSettingsDebounced();
     }
   }
+
+  try { stresAdoptServerUrl(extensionSettings[extensionName]); } catch {}
 
   // Initialize STRES client
   state.stresClient = new STRESClient(extensionSettings[extensionName].serverUrl);
