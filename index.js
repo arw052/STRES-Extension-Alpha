@@ -2989,16 +2989,16 @@ const STRESBundle = {
   bundle: null,
   bundleFetchedAt: 0,
   bundleTtlMs: 15000,
-  buttonEl: null,
-  mountObserver: null,
+  menuItem: null,
+  menuObserver: null,
 
   init(ctx) {
     this.ctx = ctx || window.SillyTavern?.getContext?.() || null;
     state.cardBundle = this;
-    this.mountQuickAction();
+    this.ensureMenuEntry();
     this.attachListeners();
     this.verifyActiveCard({ silent: true }).catch(() => {});
-    this.refreshButtonState().catch(() => {});
+    this.refreshMenuState().catch(() => {});
   },
 
   getContext() {
@@ -3072,6 +3072,7 @@ const STRESBundle = {
 
   async verifyActiveCard({ silent = false } = {}) {
     try {
+      if (!silent) this.setMenuState({ status: 'working', disabled: true, tooltip: 'Verifying card…' });
       const bundle = await this.getBundle();
       if (!bundle) {
         if (!silent) STRESChat.sendToChat('❌ STRES bundle manifest not available. Load a worldpack first.');
@@ -3125,7 +3126,7 @@ const STRESBundle = {
       if (!silent) STRESChat.sendToChat(`❌ Card verification error: ${error?.message || error}`);
       return { ok: false, reason: 'error', error };
     } finally {
-      this.refreshButtonState().catch(() => {});
+      this.refreshMenuState().catch(() => {});
     }
   },
 
@@ -3218,75 +3219,115 @@ const STRESBundle = {
         const meta = this.getMeta();
         if (meta && meta.stres) {
           delete meta.stres.detectedScenario;
+          delete meta.stres.bundleVerification;
           ctx?.saveMetadata?.();
         }
         this.verifyActiveCard({ silent: true }).catch(() => {});
-        this.refreshButtonState().catch(() => {});
+        this.refreshMenuState().catch(() => {});
+        this.ensureMenuEntry();
       });
     }
   },
-
-  mountQuickAction() {
-    const attempt = () => {
-      if (this.buttonEl) return true;
-      const anchor = document.getElementById('extensionsMenuButton');
-      if (!anchor || !anchor.parentElement) return false;
-      if (document.getElementById('stres-wand-launch')) return true;
-      const container = document.createElement('div');
-      container.id = 'stres-wand-launch';
-      container.className = 'stres-wand-launch';
-      const button = document.createElement('button');
-      button.type = 'button';
-      button.className = 'stres-wand-launch__button';
-      button.textContent = 'STRES';
-      button.title = 'Pair this chat with the active STRES worldpack';
-      button.disabled = true;
-      button.addEventListener('click', (ev) => {
-        ev.preventDefault();
-        ev.stopPropagation();
-        this.handleQuickStart().catch(() => {});
-      });
-      container.appendChild(button);
-      anchor.parentElement.insertBefore(container, anchor.nextSibling);
-      this.buttonEl = button;
-      this.refreshButtonState().catch(() => {});
+  ensureMenuEntry() {
+    const attach = () => {
+      const menu = document.getElementById('extensionsMenu');
+      if (!menu) return false;
+      let item = document.getElementById('stres-extensions-quickstart');
+      if (!item) {
+        item = document.createElement('div');
+        item.id = 'stres-extensions-quickstart';
+        item.classList.add('list-group-item', 'flex-container', 'flexGap5', 'interactable');
+        item.setAttribute('tabindex', '0');
+        const icon = document.createElement('i');
+        icon.classList.add('fa-solid', 'fa-magic-wand-sparkles');
+        const label = document.createElement('span');
+        label.textContent = 'STRES Quick Start';
+        item.append(icon, label);
+        item.addEventListener('click', (ev) => {
+          ev.preventDefault();
+          ev.stopPropagation();
+          if (item.dataset.disabled === '1') return;
+          this.handleQuickStart().catch(() => {});
+        });
+        menu.prepend(item);
+      }
+      this.menuItem = item;
+      this.refreshMenuState().catch(() => {});
       return true;
     };
 
-    if (attempt()) return;
-    if (this.mountObserver) return;
-    this.mountObserver = new MutationObserver(() => {
-      if (attempt()) {
-        this.mountObserver?.disconnect();
-        this.mountObserver = null;
+    if (attach()) return;
+    if (this.menuObserver) return;
+    this.menuObserver = new MutationObserver(() => {
+      if (attach()) {
+        this.menuObserver?.disconnect();
+        this.menuObserver = null;
       }
     });
-    this.mountObserver.observe(document.body, { childList: true, subtree: true });
+    this.menuObserver.observe(document.body, { childList: true, subtree: true });
   },
 
-  async refreshButtonState() {
-    if (!this.buttonEl) return;
+  setMenuState({ status = 'ready', disabled = false, tooltip } = {}) {
+    if (!this.menuItem) return;
+    const item = this.menuItem;
+    const labelEl = item.querySelector('span');
+    const baseLabel = 'STRES Quick Start';
+    let suffix = '';
+    switch (status) {
+      case 'loading':
+        suffix = ' (loading…)';
+        break;
+      case 'needs-verify':
+        suffix = ' (verify)';
+        break;
+      case 'working':
+        suffix = ' (working…)';
+        break;
+      case 'no-bundle':
+        suffix = ' (load worldpack)';
+        break;
+      case 'error':
+        suffix = ' (error)';
+        break;
+      default:
+        suffix = '';
+    }
+    if (labelEl) labelEl.textContent = baseLabel + suffix;
+    item.dataset.status = status;
+    item.dataset.disabled = disabled ? '1' : '0';
+    if (disabled) {
+      item.classList.remove('interactable');
+      item.style.opacity = '0.6';
+    } else {
+      item.classList.add('interactable');
+      item.style.opacity = '';
+    }
+    item.title = tooltip || 'Pair this chat with the active STRES worldpack';
+  },
+
+  async refreshMenuState() {
+    if (!this.menuItem) return;
     try {
       const bundle = await this.getBundle();
       if (!bundle) {
-        this.buttonEl.disabled = true;
-        this.buttonEl.title = 'Load a STRES worldpack to enable quick start';
+        this.setMenuState({ status: 'no-bundle', disabled: true, tooltip: 'Load a STRES worldpack to enable quick start' });
         return;
       }
       const meta = this.getMeta();
       const verified = meta?.stres?.bundleVerification?.ok === true;
-      this.buttonEl.disabled = false;
-      this.buttonEl.title = verified
-        ? 'Card verified — click to pair and launch scenario'
-        : 'Verify narrator card before quick start (button will handle it)';
+      if (verified) {
+        this.setMenuState({ status: 'ready', disabled: false, tooltip: 'Click to pair this chat with STRES and launch the narrative' });
+      } else {
+        this.setMenuState({ status: 'needs-verify', disabled: false, tooltip: 'Click to verify this card and pair with STRES' });
+      }
     } catch (error) {
-      console.warn('[STRES] Failed to refresh quick launch state', error);
+      console.warn('[STRES] Failed to refresh quick start state', error);
+      this.setMenuState({ status: 'error', disabled: true, tooltip: `Quick start unavailable: ${error?.message || error}` });
     }
   },
 
   async handleQuickStart() {
-    if (!this.buttonEl) this.mountQuickAction();
-    if (this.buttonEl) this.buttonEl.disabled = true;
+    if (this.menuItem) this.setMenuState({ status: 'working', disabled: true, tooltip: 'Pairing with STRES…' });
     try {
       const verification = await this.verifyActiveCard({ silent: true });
       if (!verification.ok) {
@@ -3323,7 +3364,7 @@ const STRESBundle = {
     } catch (error) {
       STRESChat.sendToChat(`❌ STRES quick start error: ${error?.message || error}`);
     } finally {
-      this.refreshButtonState().catch(() => {});
+      this.refreshMenuState().catch(() => {});
     }
   }
 };
