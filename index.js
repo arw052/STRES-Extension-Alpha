@@ -128,6 +128,39 @@ async function stresHashString(text) {
   return Array.from(new Uint8Array(digest)).map((b) => b.toString(16).padStart(2, '0')).join('');
 }
 
+function stresPatchScrollbarFocusWarnings() {
+  try {
+    const proto = globalThis.CSSStyleSheet?.prototype;
+    if (!proto || typeof proto.insertRule !== 'function') return;
+    if (proto.insertRule.__stresScrollbarPatched) return;
+
+    const skipPattern = /::-(webkit|moz)-scrollbar[^{}]*:focus-visible/i;
+    const originalInsertRule = proto.insertRule;
+
+    function safeInsert(rule, index) {
+      if (typeof rule === 'string' && skipPattern.test(rule)) {
+        return typeof index === 'number' ? index : this.cssRules.length;
+      }
+      try {
+        return originalInsertRule.call(this, rule, index);
+      } catch (error) {
+        if (typeof rule === 'string' && skipPattern.test(rule)) {
+          return typeof index === 'number' ? index : this.cssRules.length;
+        }
+        throw error;
+      }
+    }
+
+    safeInsert.__stresScrollbarPatched = true;
+    safeInsert.original = originalInsertRule;
+
+    proto.insertRule = safeInsert;
+    proto.insertRule.__stresScrollbarPatched = true;
+  } catch {}
+}
+
+stresPatchScrollbarFocusWarnings();
+
 function stresAdoptServerUrl(settings) {
   try {
     if (!settings) return;
