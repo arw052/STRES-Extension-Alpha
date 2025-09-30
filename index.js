@@ -26,6 +26,108 @@ try {
   }
 } catch {}
 
+// Shared normalization helpers for bundle verification + scenario detection
+const stresTextEncoder = typeof TextEncoder !== 'undefined' ? new TextEncoder() : null;
+
+function stresNormalizeText(value) {
+  if (value == null) return '';
+  return String(value)
+    .replace(/\r\n/g, '\n')
+    .replace(/[\t ]+\n/g, '\n')
+    .replace(/\n{3,}/g, '\n\n')
+    .trim();
+}
+
+function stresExtractIntroParagraph(text) {
+  const normalized = stresNormalizeText(text);
+  if (!normalized) {
+    return { normalized: '', intro: '', preview: '' };
+  }
+  const [firstBlock] = normalized.split(/\n{2,}/);
+  const intro = firstBlock.replace(/\s+/g, ' ').trim();
+  return { normalized, intro, preview: intro.slice(0, 140) };
+}
+
+function stresCanonicalize(value) {
+  if (Array.isArray(value)) {
+    return value.map((item) => stresCanonicalize(item));
+  }
+  if (value && typeof value === 'object') {
+    const entries = Object.keys(value)
+      .sort((a, b) => (a < b ? -1 : a > b ? 1 : 0))
+      .map((key) => [key, stresCanonicalize(value[key])]);
+    return Object.fromEntries(entries);
+  }
+  return value;
+}
+
+function stresCanonicalJsonStringify(value) {
+  return JSON.stringify(stresCanonicalize(value));
+}
+
+function stresResolveCardData(card) {
+  if (!card || typeof card !== 'object') return {};
+  if (card.data && typeof card.data === 'object') return card.data;
+  if (card.card && typeof card.card === 'object') {
+    if (card.card.data && typeof card.card.data === 'object') return card.card.data;
+    return card.card;
+  }
+  return card;
+}
+
+function stresBuildNormalizedCard(card) {
+  const normalized = {
+    spec: null,
+    specVersion: null,
+    firstMes: '',
+    alternateGreetings: [],
+    systemPrompt: '',
+    creatorNotes: '',
+    postHistory: '',
+    scenario: '',
+    description: ''
+  };
+  if (!card || typeof card !== 'object') return normalized;
+  const data = stresResolveCardData(card);
+  const alt = data.alternate_greetings || data.alternateGreetings || [];
+  const specCandidate = card.spec ?? data.spec ?? card.spec_version ? card.spec : null;
+  const specVersionCandidate = card.spec_version ?? card.specVersion ?? data.spec_version ?? data.specVersion ?? null;
+  normalized.spec = specCandidate || null;
+  normalized.specVersion = specVersionCandidate || null;
+  normalized.firstMes = stresNormalizeText(data.first_mes ?? data.firstMes ?? '');
+  normalized.alternateGreetings = Array.isArray(alt) ? alt.map((entry) => stresNormalizeText(entry)) : [];
+  normalized.systemPrompt = stresNormalizeText(data.system_prompt ?? data.systemPrompt ?? '');
+  normalized.creatorNotes = stresNormalizeText(data.creator_notes ?? data.creatorNotes ?? '');
+  normalized.postHistory = stresNormalizeText(data.post_history_instructions ?? data.postHistoryInstructions ?? '');
+  normalized.scenario = stresNormalizeText(data.scenario ?? '');
+  normalized.description = stresNormalizeText(data.description ?? '');
+  return normalized;
+}
+
+function stresBuildIntroRecords(normalizedCard) {
+  const records = [];
+  if (normalizedCard.firstMes) {
+    const info = stresExtractIntroParagraph(normalizedCard.firstMes);
+    records.push({ source: 'primary', info });
+  }
+  (normalizedCard.alternateGreetings || []).forEach((text, idx) => {
+    if (!text) return;
+    const info = stresExtractIntroParagraph(text);
+    records.push({ source: `alternate:${idx}`, info });
+  });
+  return records;
+}
+
+async function stresHashString(text) {
+  const encoder = stresTextEncoder || (typeof TextEncoder !== 'undefined' ? new TextEncoder() : null);
+  if (!encoder) throw new Error('TextEncoder not available for hashing');
+  const subtle = (globalThis.crypto || window.crypto)?.subtle;
+  if (!subtle || !subtle.digest) throw new Error('WebCrypto digest API unavailable');
+  const data = encoder.encode(text);
+  const digest = await subtle.digest('SHA-256', data);
+  return Array.from(new Uint8Array(digest)).map((b) => b.toString(16).padStart(2, '0')).join('');
+}
+
 // Override/extend chat helpers for Phase 7 features
 try {
   // Assistant-style message injector (e.g., NPC replies)
@@ -2882,6 +2984,350 @@ const STRESPrompts = {
   }
 };
 
+const STRESBundle = {
+  ctx: null,
+  bundle: null,
+  bundleFetchedAt: 0,
+  bundleTtlMs: 15000,
+  buttonEl: null,
+  mountObserver: null,
+
+  init(ctx) {
+    this.ctx = ctx || window.SillyTavern?.getContext?.() || null;
+    state.cardBundle = this;
+    this.mountQuickAction();
+    this.attachListeners();
+    this.verifyActiveCard({ silent: true }).catch(() => {});
+    this.refreshButtonState().catch(() => {});
+  },
+
+  getContext() {
+    if (!this.ctx) this.ctx = window.SillyTavern?.getContext?.() || null;
+    return this.ctx;
+  },
+
+  getMeta() {
+    const ctx = this.getContext();
+    if (!ctx) return null;
+    const meta = ctx.chatMetadata || (ctx.chatMetadata = {});
+    meta.stres = meta.stres || {};
+    return meta;
+  },
+
+  async getBundle(force = false) {
+    const now = Date.now();
+    if (!force && this.bundle && (now - this.bundleFetchedAt) < this.bundleTtlMs) {
+      return this.bundle;
+    }
+    try {
+      const manifest = await STRESWorld.getManifestFresh();
+      const bundle = manifest?.stresBundle || null;
+      if (bundle) {
+        this.bundle = bundle;
+        this.bundleFetchedAt = now;
+        return bundle;
+      }
+    } catch (error) {
+      console.warn('[STRES] Failed to fetch bundle manifest', error);
+    }
+    return null;
+  },
+
+  getActiveCard() {
+    const ctx = this.getContext();
+    if (!ctx) return null;
+    const rawId = ctx.characterId ?? ctx.selectedCharacterId ?? ctx.this_chid ?? null;
+    if (rawId == null) return null;
+    const key = typeof rawId === 'number' ? rawId : String(rawId);
+    const character = ctx.characters?.[key] ?? ctx.characters?.[Number(key)] ?? null;
+    if (!character) return null;
+    if (character.card && typeof character.card === 'object') return character.card;
+    const data = {
+      first_mes: character.first_mes ?? character.firstMes ?? '',
+      alternate_greetings: character.alternate_greetings ?? character.alternateGreetings ?? [],
+      system_prompt: character.system_prompt ?? character.systemPrompt ?? '',
+      creator_notes: character.creator_notes ?? character.creatorNotes ?? '',
+      post_history_instructions: character.post_history_instructions ?? character.postHistoryInstructions ?? '',
+      scenario: character.scenario ?? '',
+      description: character.description ?? ''
+    };
+    return {
+      spec: character.spec ?? character.data?.spec ?? null,
+      spec_version: character.spec_version ?? character.specVersion ?? character.data?.spec_version ?? null,
+      data
+    };
+  },
+
+  getFirstAssistantMessageText() {
+    const ctx = this.getContext();
+    if (!ctx) return null;
+    const chat = Array.isArray(ctx.chat) ? ctx.chat : [];
+    for (const message of chat) {
+      if (message && message.is_user === false && message.is_system !== true) {
+        return message.mes || message.text || '';
+      }
+    }
+    return null;
+  },
+
+  async verifyActiveCard({ silent = false } = {}) {
+    try {
+      const bundle = await this.getBundle();
+      if (!bundle) {
+        if (!silent) STRESChat.sendToChat('❌ STRES bundle manifest not available. Load a worldpack first.');
+        return { ok: false, reason: 'bundle_unavailable' };
+      }
+      const card = this.getActiveCard();
+      if (!card) {
+        if (!silent) STRESChat.sendToChat('❌ Unable to read active narrator card.');
+        return { ok: false, reason: 'card_unavailable' };
+      }
+      const normalized = stresBuildNormalizedCard(card);
+      const normalizedJson = stresCanonicalJsonStringify(normalized);
+      const cardHash = await stresHashString(normalizedJson);
+      const introRecordsRaw = stresBuildIntroRecords(normalized);
+      const introRecords = [];
+      for (const entry of introRecordsRaw) {
+        const hash = entry.info.intro ? await stresHashString(entry.info.intro) : '';
+        introRecords.push({ source: entry.source, hash });
+      }
+      const mismatches = [];
+      if (bundle.card?.hash && bundle.card.hash !== cardHash) {
+        mismatches.push(`card.hash expected ${bundle.card.hash.slice(0,16)} got ${cardHash.slice(0,16)}`);
+      }
+      const introMap = new Map(introRecords.map((r) => [r.source, r.hash]));
+      (bundle.card?.intros || []).forEach((expected) => {
+        const actual = introMap.get(expected.source);
+        if (!actual) {
+          mismatches.push(`intro[${expected.source}] missing`);
+        } else if (actual !== expected.hash) {
+          mismatches.push(`intro[${expected.source}] expected ${expected.hash.slice(0,16)} got ${actual.slice(0,16)}`);
+        }
+      });
+      const ok = mismatches.length === 0;
+      const meta = this.getMeta();
+      if (meta) {
+        meta.stres.bundleVerification = {
+          ok,
+          checkedAt: Date.now(),
+          cardHash,
+          expectedCardHash: bundle.card?.hash || null,
+          mismatches
+        };
+        this.getContext()?.saveMetadata?.();
+      }
+      if (!silent) {
+        if (ok) STRESChat.sendToChat('✅ Narrator card matches bundled fingerprint.');
+        else STRESChat.sendToChat(`❌ Card fingerprint mismatch:\n${mismatches.map((m) => `• ${m}`).join('\n')}`);
+      }
+      return { ok, mismatches, cardHash };
+    } catch (error) {
+      if (!silent) STRESChat.sendToChat(`❌ Card verification error: ${error?.message || error}`);
+      return { ok: false, reason: 'error', error };
+    } finally {
+      this.refreshButtonState().catch(() => {});
+    }
+  },
+
+  async detectScenarioFromText(text) {
+    if (!text) return null;
+    const bundle = await this.getBundle();
+    if (!bundle || !Array.isArray(bundle.scenarios)) return null;
+    const info = stresExtractIntroParagraph(text);
+    if (!info.intro) return null;
+    try {
+      const introHash = await stresHashString(info.intro);
+      const exact = bundle.scenarios.find((sc) => sc.introHash === introHash);
+      if (exact) return { scenario: exact, reason: 'hash', score: 100 };
+    } catch (error) {
+      console.warn('[STRES] Scenario hash detection failed', error);
+    }
+    const lower = info.normalized.toLowerCase();
+    let best = null;
+    for (const scenario of bundle.scenarios) {
+      let score = 0;
+      if (Array.isArray(scenario.keywords)) {
+        for (const raw of scenario.keywords) {
+          const term = String(raw || '').trim().toLowerCase();
+          if (!term) continue;
+          if (lower.includes(term)) {
+            score += term.length >= 12 ? 2 : 1;
+          }
+        }
+      }
+      if (score > 0 && (!best || score > best.score)) {
+        best = { scenario, reason: 'keywords', score };
+      }
+    }
+    return best;
+  },
+
+  getRecordedScenario() {
+    const meta = this.getMeta();
+    return meta?.stres?.detectedScenario || null;
+  },
+
+  recordScenario(scenario, reason) {
+    const meta = this.getMeta();
+    if (!meta || !scenario) return;
+    meta.stres.detectedScenario = {
+      id: scenario.id,
+      label: scenario.label || null,
+      reason,
+      recordedAt: Date.now()
+    };
+    meta.stres.scenarioId = scenario.id;
+    meta.stres.scenarioLabel = scenario.label || scenario.id;
+    this.getContext()?.saveMetadata?.();
+  },
+
+  async maybeDetectScenario(message) {
+    try {
+      if (!message || message.is_user || message.is_system) return;
+      const ctx = this.getContext();
+      if (!ctx) return;
+      const chat = Array.isArray(ctx.chat) ? ctx.chat : [];
+      const index = chat.indexOf(message);
+      if (index === -1) return;
+      if (this.getRecordedScenario()) return;
+      // Ensure this is the first assistant-style message
+      for (let i = 0; i < index; i++) {
+        const prior = chat[i];
+        if (prior && prior.is_user === false && prior.is_system !== true) {
+          return;
+        }
+      }
+      const detection = await this.detectScenarioFromText(message.mes || message.text || '');
+      if (detection && detection.scenario) {
+        this.recordScenario(detection.scenario, detection.reason);
+      }
+    } catch (error) {
+      console.warn('[STRES] Scenario detection error', error);
+    }
+  },
+
+  attachListeners() {
+    const ctx = this.getContext();
+    const es = ctx?.eventSource;
+    const ET = ctx?.eventTypes || {};
+    if (es && ET) {
+      es.on(ET.MESSAGE_RECEIVED, (message) => { this.maybeDetectScenario(message).catch(() => {}); });
+      es.on(ET.CHAT_CHANGED, () => {
+        this.bundle = null;
+        this.bundleFetchedAt = 0;
+        const meta = this.getMeta();
+        if (meta && meta.stres) {
+          delete meta.stres.detectedScenario;
+          ctx?.saveMetadata?.();
+        }
+        this.verifyActiveCard({ silent: true }).catch(() => {});
+        this.refreshButtonState().catch(() => {});
+      });
+    }
+  },
+
+  mountQuickAction() {
+    const attempt = () => {
+      if (this.buttonEl) return true;
+      const anchor = document.getElementById('extensionsMenuButton');
+      if (!anchor || !anchor.parentElement) return false;
+      if (document.getElementById('stres-wand-launch')) return true;
+      const container = document.createElement('div');
+      container.id = 'stres-wand-launch';
+      container.className = 'stres-wand-launch';
+      const button = document.createElement('button');
+      button.type = 'button';
+      button.className = 'stres-wand-launch__button';
+      button.textContent = 'STRES';
+      button.title = 'Pair this chat with the active STRES worldpack';
+      button.disabled = true;
+      button.addEventListener('click', (ev) => {
+        ev.preventDefault();
+        ev.stopPropagation();
+        this.handleQuickStart().catch(() => {});
+      });
+      container.appendChild(button);
+      anchor.parentElement.insertBefore(container, anchor.nextSibling);
+      this.buttonEl = button;
+      this.refreshButtonState().catch(() => {});
+      return true;
+    };
+
+    if (attempt()) return;
+    if (this.mountObserver) return;
+    this.mountObserver = new MutationObserver(() => {
+      if (attempt()) {
+        this.mountObserver?.disconnect();
+        this.mountObserver = null;
+      }
+    });
+    this.mountObserver.observe(document.body, { childList: true, subtree: true });
+  },
+
+  async refreshButtonState() {
+    if (!this.buttonEl) return;
+    try {
+      const bundle = await this.getBundle();
+      if (!bundle) {
+        this.buttonEl.disabled = true;
+        this.buttonEl.title = 'Load a STRES worldpack to enable quick start';
+        return;
+      }
+      const meta = this.getMeta();
+      const verified = meta?.stres?.bundleVerification?.ok === true;
+      this.buttonEl.disabled = false;
+      this.buttonEl.title = verified
+        ? 'Card verified — click to pair and launch scenario'
+        : 'Verify narrator card before quick start (button will handle it)';
+    } catch (error) {
+      console.warn('[STRES] Failed to refresh quick launch state', error);
+    }
+  },
+
+  async handleQuickStart() {
+    if (!this.buttonEl) this.mountQuickAction();
+    if (this.buttonEl) this.buttonEl.disabled = true;
+    try {
+      const verification = await this.verifyActiveCard({ silent: true });
+      if (!verification.ok) {
+        const reason = verification.mismatches?.[0] || verification.reason || 'unknown mismatch';
+        STRESChat.sendToChat(`❌ STRES quick start blocked: ${reason}`);
+        return;
+      }
+      const bundle = await this.getBundle();
+      if (!bundle) {
+        STRESChat.sendToChat('❌ No active STRES worldpack manifest available.');
+        return;
+      }
+      const settings = window.extension_settings || (this.getContext()?.extensionSettings);
+      if (settings) {
+        settings[extensionName] = settings[extensionName] || structuredClone(defaultSettings);
+        settings[extensionName].worldpackId = bundle.worldpackId;
+        try { (this.getContext()?.saveSettingsDebounced || window.saveSettingsDebounced)?.(); } catch {}
+      }
+      try { await state.stresClient.loadWorldpackById(bundle.worldpackId); } catch {}
+      let recorded = this.getRecordedScenario();
+      if (!recorded || !recorded.id) {
+        const firstText = this.getFirstAssistantMessageText();
+        const detection = await this.detectScenarioFromText(firstText || '');
+        if (detection && detection.scenario) {
+          this.recordScenario(detection.scenario, detection.reason);
+          recorded = { id: detection.scenario.id, label: detection.scenario.label, reason: detection.reason };
+        }
+      }
+      if (recorded && recorded.id) {
+        try { await STRESWorld.scenario(recorded.id); } catch {}
+      }
+      try { await STRESPrompts.refreshSceneHeaderInPrompt(); } catch {}
+      STRESChat.sendToChat(`✅ STRES paired with ${bundle.worldpackId}${recorded && recorded.id ? ` • Scenario: ${recorded.id}` : ''}`);
+    } catch (error) {
+      STRESChat.sendToChat(`❌ STRES quick start error: ${error?.message || error}`);
+    } finally {
+      this.refreshButtonState().catch(() => {});
+    }
+  }
+};
+
 // STRES API Client
 class STRESClient {
   constructor(baseUrl) {
@@ -4554,6 +5000,7 @@ async function initializeExtension() {
   // Initialize Narrator & Onboarding
   try { STRESNarrator.init(context); } catch {}
   try { STRESOnboarding.init(context); } catch {}
+  try { STRESBundle.init(context); } catch {}
   try { STRESScenario.ctx = context; } catch {}
   try {
     if (!window.__STRESScenarioListenerAttached) {

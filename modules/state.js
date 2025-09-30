@@ -13,6 +13,7 @@ export const state = {
   routingManager: null,
   npcDirectory: null,
   destinations: null,
+  cardBundle: null,
 };
 
 export const setState = (key, value) => {
