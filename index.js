@@ -3011,6 +3011,7 @@ const STRESBundle = {
   bundleTtlMs: 15000,
   menuItem: null,
   menuObserver: null,
+  bundleError: null,
 
   init(ctx) {
     this.ctx = ctx || window.SillyTavern?.getContext?.() || null;
@@ -3045,10 +3046,13 @@ const STRESBundle = {
       if (bundle) {
         this.bundle = bundle;
         this.bundleFetchedAt = now;
+        this.bundleError = null;
         return bundle;
       }
+      this.bundleError = new Error('Bundle missing in manifest');
     } catch (error) {
-      console.warn('[STRES] Failed to fetch bundle manifest', error);
+      this.bundleError = error;
+      try { console.warn('[STRES] Failed to fetch bundle manifest', error); } catch {}
     }
     return null;
   },
@@ -3095,7 +3099,13 @@ const STRESBundle = {
       if (!silent) this.setMenuState({ status: 'working', disabled: true, tooltip: 'Verifying card…' });
       const bundle = await this.getBundle();
       if (!bundle) {
-        if (!silent) STRESChat.sendToChat('❌ STRES bundle manifest not available. Load a worldpack first.');
+        if (!silent) {
+          if (this.bundleError) {
+            STRESChat.sendToChat(`❌ STRES backend unreachable: ${this.bundleError?.message || 'network error'}`);
+          } else {
+            STRESChat.sendToChat('❌ STRES bundle manifest not available. Load a worldpack first.');
+          }
+        }
         return { ok: false, reason: 'bundle_unavailable' };
       }
       const card = this.getActiveCard();
@@ -3236,6 +3246,7 @@ const STRESBundle = {
       es.on(ET.CHAT_CHANGED, () => {
         this.bundle = null;
         this.bundleFetchedAt = 0;
+        this.bundleError = null;
         const meta = this.getMeta();
         if (meta && meta.stres) {
           delete meta.stres.detectedScenario;
@@ -3306,6 +3317,9 @@ const STRESBundle = {
       case 'no-bundle':
         suffix = ' (load worldpack)';
         break;
+      case 'offline':
+        suffix = ' (offline)';
+        break;
       case 'error':
         suffix = ' (error)';
         break;
@@ -3330,7 +3344,11 @@ const STRESBundle = {
     try {
       const bundle = await this.getBundle();
       if (!bundle) {
-        this.setMenuState({ status: 'no-bundle', disabled: true, tooltip: 'Load a STRES worldpack to enable quick start' });
+        const status = this.bundleError ? 'offline' : 'no-bundle';
+        const tooltip = this.bundleError
+          ? `STRES backend unreachable: ${this.bundleError?.message || 'network error'}`
+          : 'Load a STRES worldpack to enable quick start';
+        this.setMenuState({ status, disabled: true, tooltip });
         return;
       }
       const meta = this.getMeta();
@@ -3351,7 +3369,10 @@ const STRESBundle = {
     try {
       const verification = await this.verifyActiveCard({ silent: true });
       if (!verification.ok) {
-        const reason = verification.mismatches?.[0] || verification.reason || 'unknown mismatch';
+        let reason = verification.mismatches?.[0] || verification.reason || 'unknown mismatch';
+        if (verification.reason === 'bundle_unavailable' && this.bundleError) {
+          reason = `STRES backend unreachable: ${this.bundleError?.message || 'network error'}`;
+        }
         STRESChat.sendToChat(`❌ STRES quick start blocked: ${reason}`);
         return;
       }
